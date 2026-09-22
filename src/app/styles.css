@@ -68,7 +68,7 @@ button { color: inherit; }
 .workspace { display: grid; grid-template-columns: 238px minmax(0, 1fr) 292px; min-height: 0; flex: 1; }
 .side-panel { min-width: 0; padding: 25px 17px 18px; background: var(--panel); }
 .model-panel { border-right: 1px solid var(--line); }
-.parameter-panel { border-left: 1px solid var(--line); }
+.parameter-panel { min-height: 0; overflow-y: auto; border-left: 1px solid var(--line); }
 .panel-heading h2, .viewport-toolbar h1 { margin: 5px 0 0; color: #e6f2f0; font-size: 17px; font-weight: 600; letter-spacing: -.02em; }
 
 .model-groups { margin-top: 33px; }
@@ -101,11 +101,15 @@ button { color: inherit; }
 .viewport-panel { display: flex; min-width: 0; flex-direction: column; background: #101820; }
 .viewport-toolbar { display: flex; justify-content: space-between; align-items: center; min-height: 72px; padding: 0 24px; border-bottom: 1px solid #1d2b34; }
 .viewport-actions { gap: 12px; }
+.viewport-dimensions { display: flex; gap: 8px; align-items: baseline; color: #70929a; font-size: 9px; }
+.viewport-dimensions span { color: #597079; text-transform: uppercase; letter-spacing: .08em; }
+.viewport-dimensions strong { color: #a8c3c2; font-size: 9px; font-weight: 500; }
 .status-indicator { display: inline-flex; gap: 7px; align-items: center; color: var(--soft); font-size: 10px; }
 .status-generating .status-dot { background: var(--warning); box-shadow: 0 0 10px #f2b76d80; }
 .status-error .status-dot { background: #ec7d72; box-shadow: 0 0 10px #ec7d7280; }
-.fit-button { padding: 7px 10px; border: 1px solid #2b4049; border-radius: 5px; background: #16222a; color: #b6cccb; cursor: pointer; font-size: 10px; }
-.fit-button:hover:not(:disabled) { border-color: #4e847b; color: var(--accent-bright); }
+.toggle-button, .fit-button { padding: 7px 10px; border: 1px solid #2b4049; border-radius: 5px; background: #16222a; color: #b6cccb; cursor: pointer; font-size: 10px; }
+.toggle-button.is-active { border-color: #4e847b; background: #18322f; color: var(--accent-bright); }
+.toggle-button:hover, .fit-button:hover:not(:disabled) { border-color: #4e847b; color: var(--accent-bright); }
 .fit-button:disabled { cursor: default; opacity: .45; }
 .fit-button span { margin-left: 8px; padding: 1px 4px; border: 1px solid #354c54; border-radius: 3px; color: var(--muted); font-size: 8px; }
 .viewport-canvas { position: relative; min-height: 0; flex: 1; overflow: hidden; }
@@ -121,8 +125,18 @@ button { color: inherit; }
 .parameter-heading { position: relative; }
 .backend-pill { display: inline-block; margin-top: 14px; padding: 4px 7px; border: 1px solid #29454a; border-radius: 4px; color: #69b7a8; font-size: 8px; letter-spacing: .05em; text-transform: uppercase; }
 .panel-description { margin: 17px 0 25px; color: var(--muted); font-size: 10px; line-height: 1.55; }
-.parameter-list { display: flex; flex-direction: column; gap: 23px; }
+.parameter-actions { display: flex; gap: 7px; margin-top: 16px; }
+.parameter-actions button { flex: 1; padding: 7px 6px; border: 1px solid #2d4b50; border-radius: 4px; background: #152521; color: #9ed5c9; cursor: pointer; font-size: 9px; }
+.parameter-actions button:hover { border-color: #5aa99d; color: var(--accent-bright); }
+.parameter-list { display: flex; flex-direction: column; gap: 27px; }
+.parameter-section { display: flex; flex-direction: column; gap: 16px; }
+.parameter-section > h3 { margin: 0; color: #d9e8e6; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.parameter-section-description, .parameter-group-description { margin: -8px 0 0; color: #637b82; font-size: 9px; line-height: 1.4; }
+.parameter-group { display: flex; flex-direction: column; gap: 16px; }
+.parameter-group h4 { margin: 0; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .parameter-row { padding-bottom: 19px; border-bottom: 1px solid var(--line); }
+.boolean-label { display: flex; gap: 9px; align-items: center; color: #d9e8e6; font-size: 11px; font-weight: 600; cursor: pointer; }
+.boolean-input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .parameter-label { justify-content: space-between; gap: 8px; }
 .parameter-label label { color: #d9e8e6; font-size: 11px; font-weight: 600; }
 .unit-label { margin-left: 6px; color: #668088; font-size: 9px; }

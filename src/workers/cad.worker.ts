@@ -1,7 +1,9 @@
 import opencascade from 'replicad-opencascadejs'
 import wasmUrl from 'replicad-opencascadejs/wasm?url'
 import { setOC } from 'replicad'
+import { proceduralBackend } from '../cad/procedural-backend'
 import { replicadBackend } from '../cad/replicad-backend'
+import { validateMeshData } from '../geometry/types'
 import type { CadWorkerRequest, CadWorkerResponse } from './cad.protocol'
 
 interface WorkerScope {
@@ -24,8 +26,10 @@ workerScope.onmessage = async (event: MessageEvent<CadWorkerRequest>) => {
   const { requestId, request } = event.data
 
   try {
-    await ensureOpenCascade()
-    const mesh = await replicadBackend.generate(request)
+    const backend = request.backend === 'procedural' ? proceduralBackend : replicadBackend
+    if (backend.id === 'replicad') await ensureOpenCascade()
+    const mesh = await backend.generate(request)
+    validateMeshData(mesh)
     const response: CadWorkerResponse = { type: 'generated', requestId, mesh }
     const transferables: Transferable[] = [mesh.positions.buffer, mesh.indices.buffer]
     if (mesh.normals) transferables.push(mesh.normals.buffer)

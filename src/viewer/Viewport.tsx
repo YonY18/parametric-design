@@ -1,7 +1,7 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import type { MeshData } from '../geometry/types'
+import type { ConnectionFrame, MeshData, ProfileRing } from '../geometry/types'
 import type { GenerationStatus } from '../store/modelStore'
 
 interface ViewportProps {
@@ -10,26 +10,100 @@ interface ViewportProps {
   error: string | null
 }
 
-function updateGeometry(geometry: THREE.BufferGeometry, mesh: MeshData): void {
+function createGeometry(mesh: MeshData): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry()
   geometry.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3))
   geometry.setIndex(new THREE.BufferAttribute(mesh.indices, 1))
   if (mesh.normals) {
     geometry.setAttribute('normal', new THREE.BufferAttribute(mesh.normals, 3))
   } else {
-    geometry.deleteAttribute('normal')
     geometry.computeVertexNormals()
   }
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()
+  return geometry
 }
+
+function getDimensions(mesh: MeshData): THREE.Vector3 | null {
+  const bounds = new THREE.Box3()
+  for (let index = 0; index < mesh.positions.length; index += 3) {
+    bounds.expandByPoint(new THREE.Vector3(mesh.positions[index], mesh.positions[index + 1], mesh.positions[index + 2]))
+  }
+  return bounds.isEmpty() ? null : bounds.getSize(new THREE.Vector3())
+}
+
+function formatDimension(value: number): string {
+  return `${value.toFixed(1)} mm`
+}
+
+function disposeObjectResources(object: THREE.Object3D): void {
+  object.traverse((child) => {
+    if (child instanceof THREE.Mesh || child instanceof THREE.Line) {
+      child.geometry.dispose()
+      if (Array.isArray(child.material)) child.material.forEach((material) => material.dispose())
+      else child.material.dispose()
+    }
+  })
+}
+
+function createProfileRingMarker(ring: ProfileRing, color: string): THREE.LineLoop {
+  const points = ring.points.map((point) => new THREE.Vector3(
+    Math.cos(point.angle) * point.radius,
+    Math.sin(point.angle) * point.radius,
+    ring.z,
+  ))
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  return new THREE.LineLoop(geometry, new THREE.LineBasicMaterial({ color }))
+}
+
+function createDebugMarker(frame: ConnectionFrame, color: string): THREE.Group {
+  const marker = new THREE.Group()
+  const radius = Math.max(frame.radius * 0.08, 1.5)
+  const material = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide })
+  const ring = new THREE.Mesh(new THREE.RingGeometry(radius * 0.72, radius, 32), material)
+  ring.position.set(frame.position.x, frame.position.y, frame.position.z)
+  marker.add(ring)
+
+  const center = new THREE.Mesh(new THREE.SphereGeometry(radius * 0.16, 12, 8), material.clone())
+  center.position.set(frame.position.x, frame.position.y, frame.position.z)
+  marker.add(center)
+
+  const axisGeometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(frame.position.x, frame.position.y, frame.position.z - radius * 1.8),
+    new THREE.Vector3(frame.position.x, frame.position.y, frame.position.z + radius * 1.8),
+  ])
+  marker.add(new THREE.Line(axisGeometry, new THREE.LineBasicMaterial({ color })))
+  return marker
+}
+
+const debugColors = ['#f2b76d', '#83e3ce', '#e889d4', '#7dc8ff']
+const partColors: Record<string, string> = {
+  mount: '#d89a68',
+  'mount-seat': '#c4a06c',
+  'shade-neck': '#9dd4c5',
+  'retaining-ring': '#83e3ce',
+  transition: '#e889d4',
+  shade: '#55c7b0',
+  'decorative-shade': '#55c7b0',
+  'threaded-hub': '#d89a68',
+  'internal-support': '#9dd4c5',
+}
+const mechanicalPartIds = new Set(['mount', 'mount-seat', 'threaded-hub', 'internal-support', 'retaining-ring'])
 
 export function Viewport({ mesh, status, error }: ViewportProps) {
   const mountRef = useRef<HTMLDivElement>(null)
   const meshRef = useRef<THREE.Mesh | null>(null)
   const geometryRef = useRef<THREE.BufferGeometry | null>(null)
+  const partsGroupRef = useRef<THREE.Group | null>(null)
+  const debugGroupRef = useRef<THREE.Group | null>(null)
+  const fitTargetRef = useRef<THREE.Group | null>(null)
   const fitRef = useRef<() => void>(() => undefined)
-  const latestMeshRef = useRef(mesh)
-  latestMeshRef.current = mesh
+  const hasRenderedMeshRef = useRef(false)
+  const [debugConnections, setDebugConnections] = useState(false)
+  const [explodedView, setExplodedView] = useState(false)
+  const [showMechanicalParts, setShowMechanicalParts] = useState(true)
+  const [showRetainingRing, setShowRetainingRing] = useState(true)
+  const [mechanicalCutaway, setMechanicalCutaway] = useState(false)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -66,6 +140,9 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
     fillLight.position.set(-120, 80, 60)
     scene.add(fillLight)
 
+    const visualizationGroup = new THREE.Group()
+    const partsGroup = new THREE.Group()
+    const debugGroup = new THREE.Group()
     const geometry = new THREE.BufferGeometry()
     const material = new THREE.MeshStandardMaterial({
       color: '#55c7b0',
@@ -76,13 +153,17 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
     const modelMesh = new THREE.Mesh(geometry, material)
     modelMesh.castShadow = true
     modelMesh.receiveShadow = true
-    scene.add(modelMesh)
+    visualizationGroup.add(modelMesh, partsGroup)
+    scene.add(visualizationGroup, debugGroup)
     meshRef.current = modelMesh
     geometryRef.current = geometry
+    partsGroupRef.current = partsGroup
+    debugGroupRef.current = debugGroup
+    fitTargetRef.current = visualizationGroup
 
     const fitToObject = () => {
-      if (!meshRef.current) return
-      const bounds = new THREE.Box3().setFromObject(meshRef.current)
+      if (!fitTargetRef.current) return
+      const bounds = new THREE.Box3().setFromObject(fitTargetRef.current)
       if (bounds.isEmpty()) return
       const center = bounds.getCenter(new THREE.Vector3())
       const size = bounds.getSize(new THREE.Vector3())
@@ -110,11 +191,6 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
     resizeObserver.observe(mount)
     resize()
 
-    if (latestMeshRef.current) {
-      updateGeometry(geometry, latestMeshRef.current)
-      fitToObject()
-    }
-
     let animationFrame = 0
     const animate = () => {
       animationFrame = requestAnimationFrame(animate)
@@ -127,22 +203,89 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
       cancelAnimationFrame(animationFrame)
       resizeObserver.disconnect()
       controls.dispose()
-      geometry.dispose()
+      geometryRef.current?.dispose()
+      if (partsGroupRef.current) disposeObjectResources(partsGroupRef.current)
+      if (debugGroupRef.current) disposeObjectResources(debugGroupRef.current)
       material.dispose()
       renderer.dispose()
       renderer.domElement.remove()
       meshRef.current = null
       geometryRef.current = null
+      partsGroupRef.current = null
+      debugGroupRef.current = null
+      fitTargetRef.current = null
       fitRef.current = () => undefined
     }
   }, [])
 
   useEffect(() => {
-    if (!mesh || !geometryRef.current) return
-    updateGeometry(geometryRef.current, mesh)
-    window.requestAnimationFrame(() => fitRef.current())
-  }, [mesh])
+    const modelMesh = meshRef.current
+    const partsGroup = partsGroupRef.current
+    const debugGroup = debugGroupRef.current
+    if (!modelMesh || !partsGroup || !debugGroup) return
 
+    disposeObjectResources(partsGroup)
+    partsGroup.clear()
+    disposeObjectResources(debugGroup)
+    debugGroup.clear()
+
+    if (!mesh) {
+      modelMesh.visible = false
+      return
+    }
+
+    const nextGeometry = createGeometry(mesh)
+    const previousGeometry = geometryRef.current
+    modelMesh.geometry = nextGeometry
+    geometryRef.current = nextGeometry
+
+    const parts = mesh.parts ?? []
+    const renderParts = parts.length > 0 && (explodedView || mechanicalCutaway || !showMechanicalParts || !showRetainingRing)
+    if (renderParts) {
+      modelMesh.visible = false
+      const dimensions = getDimensions(mesh)
+      const separation = Math.max(12, (dimensions?.z ?? 100) * 0.08)
+      parts.forEach((part, index) => {
+        const isMechanical = mechanicalPartIds.has(part.id)
+        const visible = mechanicalCutaway
+          ? isMechanical
+          : (!isMechanical || showMechanicalParts) && (part.id !== 'retaining-ring' || showRetainingRing)
+        const partMesh = new THREE.Mesh(
+          createGeometry(part.mesh),
+          new THREE.MeshStandardMaterial({
+            color: partColors[part.id] ?? '#83e3ce',
+            roughness: 0.3,
+            metalness: 0.08,
+            side: THREE.DoubleSide,
+          }),
+        )
+        partMesh.visible = visible
+        partMesh.position.z = explodedView ? index * separation : 0
+        partMesh.castShadow = true
+        partMesh.receiveShadow = true
+        partsGroup.add(partMesh)
+      })
+    } else {
+      modelMesh.visible = true
+    }
+
+    if (debugConnections) {
+      for (const [index, marker] of (mesh.connectionFrames ?? []).entries()) {
+        debugGroup.add(createDebugMarker(marker.frame, debugColors[index % debugColors.length]))
+      }
+      for (const [index, marker] of (mesh.profileRings ?? []).entries()) {
+        debugGroup.add(createProfileRingMarker(marker.ring, debugColors[(index + 1) % debugColors.length]))
+      }
+    }
+
+    previousGeometry?.dispose()
+    if (!hasRenderedMeshRef.current) {
+      hasRenderedMeshRef.current = true
+      window.requestAnimationFrame(() => fitRef.current())
+    }
+  }, [mesh, debugConnections, explodedView, showMechanicalParts, showRetainingRing, mechanicalCutaway])
+
+  const dimensions = mesh ? getDimensions(mesh) : null
   const isLoading = status === 'generating'
 
   return (
@@ -153,6 +296,54 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
           <h1>3D Viewport</h1>
         </div>
         <div className="viewport-actions">
+          {dimensions && (
+            <div className="viewport-dimensions" aria-label="Bounding-box dimensions">
+              <span>Dimensions</span>
+              <strong>X {formatDimension(dimensions.x)}</strong>
+              <strong>Y {formatDimension(dimensions.y)}</strong>
+              <strong>Z {formatDimension(dimensions.z)}</strong>
+            </div>
+          )}
+          <button
+            aria-pressed={showMechanicalParts}
+            className={`toggle-button${showMechanicalParts ? ' is-active' : ''}`}
+            onClick={() => setShowMechanicalParts((value) => !value)}
+            type="button"
+          >
+            Show Mechanical Parts
+          </button>
+          <button
+            aria-pressed={showRetainingRing}
+            className={`toggle-button${showRetainingRing ? ' is-active' : ''}`}
+            onClick={() => setShowRetainingRing((value) => !value)}
+            type="button"
+          >
+            {showRetainingRing ? 'Hide Ring' : 'Show Retaining Ring'}
+          </button>
+          <button
+            aria-pressed={mechanicalCutaway}
+            className={`toggle-button${mechanicalCutaway ? ' is-active' : ''}`}
+            onClick={() => setMechanicalCutaway((value) => !value)}
+            type="button"
+          >
+            Mechanical Cutaway
+          </button>
+          <button
+            aria-pressed={debugConnections}
+            className={`toggle-button${debugConnections ? ' is-active' : ''}`}
+            onClick={() => setDebugConnections((value) => !value)}
+            type="button"
+          >
+            Connections
+          </button>
+          <button
+            aria-pressed={explodedView}
+            className={`toggle-button${explodedView ? ' is-active' : ''}`}
+            onClick={() => setExplodedView((value) => !value)}
+            type="button"
+          >
+            Exploded
+          </button>
           <span className={`status-indicator status-${status}`}>
             <span className="status-dot" />
             {status === 'generating' ? 'Generating' : status === 'error' ? 'Needs attention' : 'Ready'}
