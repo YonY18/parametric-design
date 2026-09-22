@@ -78,17 +78,12 @@ function createDebugMarker(frame: ConnectionFrame, color: string): THREE.Group {
 
 const debugColors = ['#f2b76d', '#83e3ce', '#e889d4', '#7dc8ff']
 const partColors: Record<string, string> = {
-  mount: '#d89a68',
-  'mount-seat': '#c4a06c',
-  'shade-neck': '#9dd4c5',
-  'retaining-ring': '#83e3ce',
-  transition: '#e889d4',
-  shade: '#55c7b0',
   'decorative-shade': '#55c7b0',
-  'threaded-hub': '#d89a68',
   'internal-support': '#9dd4c5',
+  'threaded-hub': '#d89a68',
+  'retaining-ring': '#83e3ce',
 }
-const mechanicalPartIds = new Set(['mount', 'mount-seat', 'threaded-hub', 'internal-support', 'retaining-ring'])
+const mechanicalPartIds = new Set(['threaded-hub', 'internal-support', 'retaining-ring'])
 
 export function Viewport({ mesh, status, error }: ViewportProps) {
   const mountRef = useRef<HTMLDivElement>(null)

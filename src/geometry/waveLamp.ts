@@ -13,17 +13,6 @@ function parameterNumber(parameters: ParameterValues, id: string): number {
   return value
 }
 
-function parameterBoolean(parameters: ParameterValues, id: string): boolean {
-  const value = parameters[id]
-  if (value === undefined) return true
-  if (typeof value !== 'boolean') throw new Error(`Parameter "${id}" must be a boolean.`)
-  return value
-}
-
-function addTriangle(indices: number[], a: number, b: number, c: number): void {
-  indices.push(a, b, c)
-}
-
 export interface WaveLampComposition {
   shadeInputFrame?: ConnectionFrame
 }
@@ -39,46 +28,55 @@ function waveLampDeformers(parameters: ParameterValues) {
   return createWaveLampDeformers({
     waves: parameterNumber(parameters, 'waves'),
     waveAmplitude: parameterNumber(parameters, 'waveAmplitude'),
-    wavePhase: parameterNumber(parameters, 'wavePhase'),
+    wavePhase: 0,
     twist: parameterNumber(parameters, 'twist'),
-    bulgeAmount: parameterNumber(parameters, 'bulgeAmount'),
-    bulgeCenter: parameterNumber(parameters, 'bulgeCenter'),
-    bulgeWidth: parameterNumber(parameters, 'bulgeWidth'),
-    verticalWaveCount: parameterNumber(parameters, 'verticalWaveCount'),
-    verticalWaveAmplitude: parameterNumber(parameters, 'verticalWaveAmplitude'),
-    verticalWavePhase: parameterNumber(parameters, 'verticalWavePhase'),
-    taperBottomScale: parameterNumber(parameters, 'taperBottomScale'),
-    taperTopScale: parameterNumber(parameters, 'taperTopScale'),
-    taperEnabled: parameterBoolean(parameters, 'taperEnabled'),
-    waveEnabled: parameterBoolean(parameters, 'waveEnabled'),
-    twistEnabled: parameterBoolean(parameters, 'twistEnabled'),
-    bulgeEnabled: parameterBoolean(parameters, 'bulgeEnabled'),
-    verticalWaveEnabled: parameterBoolean(parameters, 'verticalWaveEnabled'),
+    bulgeAmount: 0,
+    bulgeCenter: 0.5,
+    bulgeWidth: 0.35,
+    verticalWaveCount: 0,
+    verticalWaveAmplitude: 0,
+    verticalWavePhase: 0,
+    taperBottomScale: 1,
+    taperTopScale: 1,
+    taperEnabled: false,
+    waveEnabled: true,
+    twistEnabled: true,
+    bulgeEnabled: false,
+    verticalWaveEnabled: false,
   })
+}
+
+function baseRadius(parameters: ParameterValues, normalizedHeight: number): number {
+  const maxRadius = parameterNumber(parameters, 'maxDiameter') / 2
+  const topRadius = parameterNumber(parameters, 'topDiameter') / 2
+  return maxRadius + (topRadius - maxRadius) * normalizedHeight
 }
 
 export function createWaveLampProfileRing(options: WaveLampProfileOptions): ProfileRing {
   const height = parameterNumber(options.parameters, 'height')
-  const topRadius = parameterNumber(options.parameters, 'topDiameter') / 2
   const radialSegments = parameterNumber(options.parameters, 'radialSegments')
   const t = Math.min(1, Math.max(0, options.normalizedHeight))
   const deformers = waveLampDeformers(options.parameters)
   const vertex: DeformerVertex = {
     normalizedHeight: t,
     angle: 0,
-    radius: options.inputFrame.radius,
+    radius: baseRadius(options.parameters, t),
     deformationWeight: options.deformationWeight ?? 1,
   }
   const points = []
   for (let column = 0; column < radialSegments; column += 1) {
     vertex.normalizedHeight = t
     vertex.angle = (Math.PI * 2 * column) / radialSegments
-    vertex.radius = options.inputFrame.radius + (topRadius - options.inputFrame.radius) * t
+    vertex.radius = baseRadius(options.parameters, t)
     vertex.deformationWeight = options.deformationWeight ?? 1
     applyDeformers(vertex, deformers)
     points.push({ angle: vertex.angle, radius: vertex.radius })
   }
   return { z: options.inputFrame.position.z + height * t, points }
+}
+
+function addTriangle(indices: number[], a: number, b: number, c: number): void {
+  indices.push(a, b, c)
 }
 
 function addNormal(normals: Float32Array, positions: Float32Array, a: number, b: number, c: number): void {
@@ -111,8 +109,7 @@ export function generateWaveLampMesh(
   lampComposition?: WaveLampComposition,
 ): MeshData {
   const height = parameterNumber(parameters, 'height')
-  const bottomDiameter = parameterNumber(parameters, 'bottomDiameter')
-  const topDiameter = parameterNumber(parameters, 'topDiameter')
+  const maxRadius = parameterNumber(parameters, 'maxDiameter') / 2
   const wallThickness = parameterNumber(parameters, 'wallThickness')
   const verticalSegments = parameterNumber(parameters, 'verticalSegments')
   const radialSegments = parameterNumber(parameters, 'radialSegments')
@@ -122,17 +119,14 @@ export function generateWaveLampMesh(
   const vertexCount = ringVertexCount * 2
   const positions = new Float32Array(vertexCount * 3)
   const indices: number[] = []
-  const bottomRadius = bottomDiameter / 2
-  const topRadius = topDiameter / 2
-  const shadeInputFrame = lampComposition?.shadeInputFrame ?? createConnectionFrame(0, bottomRadius)
+  const shadeInputFrame = lampComposition?.shadeInputFrame ?? createConnectionFrame(0, maxRadius)
   validateConnectionFrame(shadeInputFrame, 'Shade input frame')
-  const shadeBottomRadius = shadeInputFrame.radius
   const shadeStartZ = shadeInputFrame.position.z
   const deformers = waveLampDeformers(parameters)
   const rowIndex = (row: number, column: number) => row * radialSegments + (column % radialSegments + radialSegments) % radialSegments
   const outerIndex = (row: number, column: number) => rowIndex(row, column)
   const innerIndex = (row: number, column: number) => ringVertexCount + rowIndex(row, column)
-  const vertex: DeformerVertex = { normalizedHeight: 0, angle: 0, radius: shadeBottomRadius, deformationWeight: 1 }
+  const vertex: DeformerVertex = { normalizedHeight: 0, angle: 0, radius: maxRadius, deformationWeight: 1 }
 
   for (let row = 0; row < rows; row += 1) {
     const t = row / verticalSegments
@@ -140,13 +134,11 @@ export function generateWaveLampMesh(
     for (let column = 0; column < radialSegments; column += 1) {
       vertex.normalizedHeight = t
       vertex.angle = (Math.PI * 2 * column) / radialSegments
-      vertex.radius = shadeBottomRadius + (topRadius - shadeBottomRadius) * t
-      const lastDeformerName = applyDeformers(vertex, deformers)
+      vertex.radius = baseRadius(parameters, t)
+      applyDeformers(vertex, deformers)
 
       const radius = vertex.radius
-      if (radius <= wallThickness) {
-        throw new Error(`Deformer "${lastDeformerName}" collapsed the inner surface; reduce a radial amplitude.`)
-      }
+      if (radius <= wallThickness) throw new Error('Wave amplitude too large for current wall thickness.')
       const cosAngle = Math.cos(vertex.angle)
       const sinAngle = Math.sin(vertex.angle)
       const outer = outerIndex(row, column)
@@ -194,8 +186,8 @@ export function generateWaveLampMesh(
   for (let index = 0; index < typedIndices.length; index += 3) {
     addNormal(normals, positions, typedIndices[index], typedIndices[index + 1], typedIndices[index + 2])
   }
-  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
-    const offset = vertex * 3
+  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex += 1) {
+    const offset = vertexIndex * 3
     const length = Math.hypot(normals[offset], normals[offset + 1], normals[offset + 2])
     if (!Number.isFinite(length) || length === 0) throw new Error('Generated Wave Lamp contains a degenerate normal.')
     normals[offset] /= length
