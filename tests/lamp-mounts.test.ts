@@ -1,10 +1,11 @@
 import { parametricWaveLamp } from '../src/generators/wave-lamp.ts'
 import { proceduralBackend } from '../src/cad/procedural-backend.ts'
+import { deriveMechanicalCore } from '../src/geometry/mechanicalCore.ts'
 import { createConnectionFrame, type MeshData, type MeshPart } from '../src/geometry/types.ts'
-import { createWaveLampProfileRing, generateWaveLampMesh } from '../src/geometry/waveLamp.ts'
+import { generateWaveLampMesh } from '../src/geometry/waveLamp.ts'
 import { validateInternalShadeSupport } from '../src/geometry/internalShadeSupport.ts'
+import { validateRetainingRing } from '../src/geometry/retainingRing.ts'
 import { validateThreadedHub } from '../src/geometry/threadedHub.ts'
-import { deriveRetainingRingParameters, resolveAttachmentInterface } from '../src/geometry/attachmentInterface.ts'
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message)
@@ -70,16 +71,44 @@ function assertExteriorEqual(left: MeshData, right: MeshData, message: string): 
 const defaults = parametricWaveLamp.defaults
 const mountedParameters = (overrides: Record<string, number | string | boolean> = {}) => ({
   ...defaults,
-  mountType: 'generic-threaded' as const,
-  mountPreset: '60',
+  mountType: 'threaded' as const,
   ...overrides,
 })
+
+const schemaIds = parametricWaveLamp.parameters.map((parameter) => parameter.id)
+const legacyIds = schemaIds.filter((id) => id !== 'mountType'
+  && /^(mount|retainingRing|attachment|shadeNeck|transition)/.test(id))
+assert(legacyIds.length === 0, `Normal schema exposes legacy parameters: ${legacyIds.join(', ')}`)
+assert(schemaIds.includes('maxDiameter'), 'Normal schema exposes maxDiameter.')
+assert(schemaIds.includes('nominalThreadDiameter'), 'Normal schema exposes nominalThreadDiameter.')
 
 const defaultValidation = parametricWaveLamp.validate(defaults)
 assert(defaultValidation.valid, `Default Wave Lamp should validate: ${defaultValidation.errors.join(' ')}`)
 const defaultShade = generateWaveLampMesh(defaults)
-assert(defaultShade.positions.length > 0 && defaultShade.indices.length > 0, 'Default decorative shade generates mesh data.')
-assert(defaultShade.positions[2] === 0, 'Unmounted decorative shade starts at global Z=0.')
+finiteMesh(defaultShade, 'Decorative shade')
+assertNoBadTriangles(defaultShade, 'Decorative shade')
+assert(defaultShade.positions[2] === 0, 'Decorative shade starts at global Z=0.')
+
+const coreInput = {
+  mountType: 'threaded' as const,
+  nominalThreadDiameter: defaults.nominalThreadDiameter,
+  threadPitch: defaults.threadPitch,
+  threadClearance: defaults.threadClearance,
+  cableHoleDiameter: defaults.cableHoleDiameter,
+  supportInset: defaults.supportInset,
+  supportThickness: defaults.supportThickness,
+  wallThickness: defaults.wallThickness,
+  height: defaults.height,
+  radialSegments: defaults.radialSegments,
+  maxDiameter: defaults.maxDiameter,
+}
+const core = deriveMechanicalCore(coreInput)
+assert(core.dimensions.hubOuterDiameter > core.dimensions.hubOpeningDiameter, 'Mechanical Core derives hub body dimensions.')
+assert(core.dimensions.ringOuterDiameter > core.dimensions.ringInnerDiameter, 'Mechanical Core derives retaining ring dimensions.')
+assert(core.dimensions.supportOuterDiameter > core.dimensions.supportInnerDiameter, 'Mechanical Core derives support dimensions.')
+assert(validateThreadedHub(core.hub).valid, 'Derived Threaded Hub parameters validate.')
+assert(validateRetainingRing(core.ring).valid, 'Derived Retaining Ring parameters validate.')
+assert(validateInternalShadeSupport(core.support).valid, 'Derived annular Internal Support parameters validate.')
 
 const mounted = mountedParameters()
 const mountedValidation = parametricWaveLamp.validate(mounted)
@@ -89,48 +118,58 @@ const mountedMesh = await proceduralBackend.generate({
   operation: 'wave-lamp',
   parameters: mounted,
 })
-const expectedPartIds = ['mount', 'mount-seat', 'threaded-hub', 'internal-support', 'decorative-shade', 'retaining-ring']
-for (const id of expectedPartIds) assert(Boolean(mountedMesh.parts?.some((candidate) => candidate.id === id)), `Mounted assembly exposes ${id}.`)
-assert(!mountedMesh.parts?.some((candidate) => candidate.id === 'transition'), 'Mounted assembly does not create a decorative transition.')
-assert(!mountedMesh.parts?.some((candidate) => candidate.id === 'shade-neck'), 'Mounted assembly does not create a shade neck.')
-finiteMesh(mountedMesh, 'Mounted assembly')
+const expectedPartIds = ['decorative-shade', 'internal-support', 'threaded-hub', 'retaining-ring']
+assert(
+  JSON.stringify(mountedMesh.parts?.map((candidate) => candidate.id)) === JSON.stringify(expectedPartIds),
+  'Threaded assembly exposes only the three rescue layers.',
+)
+assert(!mountedMesh.parts?.some((candidate) => ['mount', 'mount-seat', 'transition', 'shade-neck'].includes(candidate.id)), 'Rescue assembly does not create legacy parts.')
+finiteMesh(mountedMesh, 'Threaded assembly')
 for (const candidate of mountedMesh.parts ?? []) {
   finiteMesh(candidate.mesh, candidate.id)
-  if (candidate.id === 'threaded-hub' || candidate.id === 'internal-support') assertNoBadTriangles(candidate.mesh, candidate.id)
+  assertNoBadTriangles(candidate.mesh, candidate.id)
 }
 
 const decorative = part(mountedMesh, 'decorative-shade')
 const support = part(mountedMesh, 'internal-support')
 const hub = part(mountedMesh, 'threaded-hub')
-const ring = part(mountedMesh, 'retaining-ring')
 const radialSegments = Number(mounted.radialSegments)
 const supportMarker = mountedMesh.profileRings?.find((marker) => marker.id === 'decorative-shade:support-interior-profile')
-assert(Boolean(supportMarker), 'Mounted assembly exposes the actual support interior profile.')
+assert(Boolean(supportMarker), 'Threaded assembly exposes the actual support interior profile.')
 if (!supportMarker) throw new Error('Support interior profile marker is missing.')
 
 const expectedDecorative = generateWaveLampMesh(mounted, {
-  shadeInputFrame: createConnectionFrame(decorative.inputFrame?.position.z ?? 0, Number(mounted.bottomDiameter) / 2),
+  shadeInputFrame: createConnectionFrame(decorative.inputFrame?.position.z ?? 0, Number(mounted.maxDiameter) / 2),
 })
 assertExteriorEqual(decorative.mesh, expectedDecorative, 'Decorative Shade keeps the normal deformation')
 assert(radialRange(hub.mesh, 0, radialSegments).max - radialRange(hub.mesh, 0, radialSegments).min < 1e-5, 'Threaded Hub outer ring remains circular.')
-assert(radialRange(hub.mesh, radialSegments * 2, radialSegments).max - radialRange(hub.mesh, radialSegments * 2, radialSegments).min < 1e-5, 'Threaded Hub inner opening remains circular.')
+assert(radialRange(hub.mesh, radialSegments * 2, radialSegments).max - radialRange(hub.mesh, radialSegments * 2, radialSegments).min < 1e-5, 'Threaded Hub central opening remains circular.')
 
-const supportOuterVertexCount = radialSegments
-for (let column = 0; column < supportOuterVertexCount; column += 1) {
+for (let column = 0; column < radialSegments; column += 1) {
   const supportOffset = column * 3
   const supportRadius = Math.hypot(support.mesh.positions[supportOffset], support.mesh.positions[supportOffset + 1])
   const profilePoint = supportMarker.ring.points[column]
   assertNear(supportRadius, profilePoint.radius, `Internal Support reaches the shade inner profile at column ${column}`)
-  assertNear(support.mesh.positions[supportOffset], Math.cos(profilePoint.angle) * profilePoint.radius, `Internal Support X joins the shade profile at column ${column}`)
-  assertNear(support.mesh.positions[supportOffset + 1], Math.sin(profilePoint.angle) * profilePoint.radius, `Internal Support Y joins the shade profile at column ${column}`)
-  assert(profilePoint.radius < Number(mounted.bottomDiameter), 'Internal Support does not exceed the shade exterior.')
+  assert(profilePoint.radius > 0, 'Internal Support has no negative interior radii.')
 }
 assertNear(
   Math.min(...Array.from(support.mesh.positions).filter((_, offset) => offset % 3 === 2)),
-  (decorative.inputFrame?.position.z ?? 0) + Number(mounted.supportInset),
-  'supportInset positions the plate',
+  Number(mounted.supportInset),
+  'Support inset positions the plate',
 )
-assert(supportMarker.ring.points.every((point) => point.radius > 0), 'Internal Support has no negative or zero interior radii.')
+
+const threadVariant = await proceduralBackend.generate({
+  backend: 'procedural',
+  operation: 'wave-lamp',
+  parameters: mountedParameters({ nominalThreadDiameter: 36, threadPitch: 1.5 }),
+})
+assertExteriorEqual(part(threadVariant, 'decorative-shade').mesh, decorative.mesh, 'Mechanical dimensions do not deform the exterior shade')
+
+assert(!parametricWaveLamp.validate(mountedParameters({ cableHoleDiameter: 41 })).valid, 'Oversized cable holes are rejected.')
+assert(parametricWaveLamp.validate(mountedParameters({ cableHoleDiameter: 41 })).errors.some((error) => error === 'Cable hole too large for selected hub.'), 'Cable validation is short and clear.')
+assert(parametricWaveLamp.validate({ ...defaults, topDiameter: 40, waveAmplitude: 20 }).errors.includes('Wave amplitude too large for current wall thickness.'), 'Wave amplitude validation is short and clear.')
+assert(parametricWaveLamp.validate(mountedParameters({ nominalThreadDiameter: 80 })).errors.includes('Support plate would not reach the shade inner wall.'), 'Support reach validation is short and clear.')
+assert(parametricWaveLamp.validate(mountedParameters({ supportInset: Number(mounted.height) })).errors.some((error) => error.includes('inside the shade')), 'Support inset outside the shade is rejected.')
 assert(validateInternalShadeSupport({
   supportType: '3-arm',
   supportInset: 10,
@@ -139,85 +178,5 @@ assert(validateInternalShadeSupport({
   shadeWallThickness: 1.2,
   radialSegments,
 }).valid === false, 'Unsupported Internal Shade Support modes are rejected.')
-assert(validateThreadedHub({
-  hubOuterDiameter: 46,
-  hubHeight: 12,
-  hubWallThickness: 2,
-  threadDiameter: 40,
-  threadPitch: 2,
-  threadLength: 12,
-  threadClearance: 0.2,
-  threadDirection: 'right',
-  radialSegments,
-}).valid, 'Threaded Hub defaults validate.')
 
-const hubDiameterVariant = await proceduralBackend.generate({
-  backend: 'procedural',
-  operation: 'wave-lamp',
-  parameters: mountedParameters({ hubOuterDiameter: 50 }),
-})
-assertExteriorEqual(part(hubDiameterVariant, 'decorative-shade').mesh, decorative.mesh, 'hubOuterDiameter does not change decorative exterior profile')
-
-const legacyTransitionVariant = await proceduralBackend.generate({
-  backend: 'procedural',
-  operation: 'wave-lamp',
-  parameters: mountedParameters({
-    blendHeight: 180,
-    decorativeStartRadius: 18,
-    transitionStartRadius: 18,
-    transitionEndRadius: 18,
-    transitionHeight: 120,
-  }),
-})
-assertExteriorEqual(part(legacyTransitionVariant, 'decorative-shade').mesh, decorative.mesh, 'Mounted legacy transition controls do not funnel the shade to the mount')
-
-const threadVariant = await proceduralBackend.generate({
-  backend: 'procedural',
-  operation: 'wave-lamp',
-  parameters: mountedParameters({ attachmentThreadDiameter: 36, attachmentFlangeRadialClearance: 0.5 }),
-})
-assertExteriorEqual(part(threadVariant, 'decorative-shade').mesh, decorative.mesh, 'threadDiameter does not change decorative exterior profile')
-
-const mountVariant = await proceduralBackend.generate({
-  backend: 'procedural',
-  operation: 'wave-lamp',
-  parameters: mountedParameters({ mountOuterDiameter: 70, mountHeight: 30 }),
-})
-assertExteriorEqual(part(mountVariant, 'decorative-shade').mesh, decorative.mesh, 'Mount size variations do not deform shade exterior')
-
-const ringVariant = await proceduralBackend.generate({
-  backend: 'procedural',
-  operation: 'wave-lamp',
-  parameters: mountedParameters({ bottomDiameter: 220, topDiameter: 180 }),
-})
-assertExteriorEqual(part(ringVariant, 'retaining-ring').mesh, ring.mesh, 'Retaining Ring depends on AttachmentInterface, not decorative diameter')
-const ringRadii = radialRange(ring.mesh, 0, 64)
-assert(ringRadii.max < Number(mounted.bottomDiameter) / 2, 'Retaining Ring remains compact around the attachment interface.')
-
-const attachment = resolveAttachmentInterface(mounted)
-const ringParameters = deriveRetainingRingParameters(attachment, {
-  gripStyle: 'smooth',
-  gripDepth: 0,
-  gripCount: 12,
-})
-assert(ringParameters.outerDiameter < Number(mounted.bottomDiameter), 'Retaining Ring dimensions do not use the decorative diameter.')
-
-const supportZ = decorative.inputFrame?.position.z ?? 0
-const directSupportProfile = createWaveLampProfileRing({
-  parameters: mounted,
-  inputFrame: createConnectionFrame(supportZ, Number(mounted.bottomDiameter) / 2),
-  normalizedHeight: Number(mounted.supportInset) / Number(mounted.height),
-})
-assertNear(directSupportProfile.z, supportZ + Number(mounted.supportInset), 'Support profile is evaluated at supportInset')
-assertNear(supportMarker.ring.z, directSupportProfile.z, 'Support profile marker has the support plane Z')
-
-const invalidSupport = parametricWaveLamp.validate(mountedParameters({ supportType: '4-arm' }))
-assert(!invalidSupport.valid && invalidSupport.errors.some((error) => error.includes('only annular')), 'Unsupported supportType is rejected by the Wave Lamp validator.')
-const invalidHub = parametricWaveLamp.validate(mountedParameters({ hubOuterDiameter: 40 }))
-assert(!invalidHub.valid && invalidHub.errors.some((error) => error.includes('Threaded Hub')), 'Threaded Hub dimensions reject a non-positive wall.')
-const invalidInset = parametricWaveLamp.validate(mountedParameters({ supportInset: Number(mounted.height) }))
-assert(!invalidInset.valid && invalidInset.errors.some((error) => error.includes('inside')), 'Support inset outside the shade is rejected.')
-
-assert(Array.from(mountedMesh.positions).every((value) => Number.isFinite(value)), 'Mounted mesh contains no NaN or Infinity.')
-assert(Array.from(mountedMesh.positions).every((value, offset) => offset % 3 !== 2 || Number.isFinite(value)), 'Mounted Z coordinates are finite.')
-console.log('Lamp mount redesign tests passed.')
+console.log('Lamp rescue architecture tests passed.')
