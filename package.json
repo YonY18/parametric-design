@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node tests/deformers.test.ts && node --experimental-strip-types --loader ./tests/ts-extension-loader.mjs tests/lamp-mounts.test.ts",
+    "test": "node tests/deformers.test.ts && node --experimental-strip-types --loader ./tests/ts-extension-loader.mjs tests/thread-spec.test.ts && node --experimental-strip-types --loader ./tests/ts-extension-loader.mjs tests/lamp-mounts.test.ts",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "build": "vite build"

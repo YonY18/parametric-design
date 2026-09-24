@@ -1,14 +1,13 @@
-import {
-  applyDeformers,
-  createWaveLampDeformers,
-  type DeformerVertex,
-} from './deformers'
 import { validateConnectionFrame } from './assembly'
+import {
+  createDecorativeProfilePoint,
+  type DecorativeProfileParameters,
+} from './decorativeProfile'
 import { createConnectionFrame, validateMeshData, type ConnectionFrame, type MeshData, type ProfileRing } from './types'
 import type { ParameterValues } from '../parametric/types'
 
-function parameterNumber(parameters: ParameterValues, id: string): number {
-  const value = Number(parameters[id])
+function parameterNumber(parameters: ParameterValues, id: string, legacyId?: string): number {
+  const value = Number(parameters[id] ?? (legacyId ? parameters[legacyId] : undefined))
   if (!Number.isFinite(value)) throw new Error(`Parameter "${id}" must be a finite number.`)
   return value
 }
@@ -24,53 +23,38 @@ export interface WaveLampProfileOptions {
   deformationWeight?: number
 }
 
-function waveLampDeformers(parameters: ParameterValues) {
-  return createWaveLampDeformers({
-    waves: parameterNumber(parameters, 'waves'),
-    waveAmplitude: parameterNumber(parameters, 'waveAmplitude'),
-    wavePhase: 0,
-    twist: parameterNumber(parameters, 'twist'),
-    bulgeAmount: 0,
-    bulgeCenter: 0.5,
-    bulgeWidth: 0.35,
-    verticalWaveCount: 0,
-    verticalWaveAmplitude: 0,
-    verticalWavePhase: 0,
-    taperBottomScale: 1,
-    taperTopScale: 1,
-    taperEnabled: false,
-    waveEnabled: true,
-    twistEnabled: true,
-    bulgeEnabled: false,
-    verticalWaveEnabled: false,
-  })
+function decorativeParameters(parameters: ParameterValues): DecorativeProfileParameters {
+  return parameters as DecorativeProfileParameters
 }
 
-function baseRadius(parameters: ParameterValues, normalizedHeight: number): number {
-  const maxRadius = parameterNumber(parameters, 'maxDiameter') / 2
-  const topRadius = parameterNumber(parameters, 'topDiameter') / 2
-  return maxRadius + (topRadius - maxRadius) * normalizedHeight
+function createShadePoint(
+  parameters: ParameterValues,
+  inputFrame: ConnectionFrame,
+  normalizedHeight: number,
+  angle: number,
+  deformationWeight = 1,
+) {
+  const mountingEnd = normalizedHeight === 0
+  return createDecorativeProfilePoint(
+    decorativeParameters(parameters),
+    normalizedHeight,
+    angle,
+    mountingEnd ? 0 : deformationWeight,
+    mountingEnd ? inputFrame.radius : undefined,
+    mountingEnd ? 0 : 1,
+  )
 }
 
 export function createWaveLampProfileRing(options: WaveLampProfileOptions): ProfileRing {
   const height = parameterNumber(options.parameters, 'height')
   const radialSegments = parameterNumber(options.parameters, 'radialSegments')
   const t = Math.min(1, Math.max(0, options.normalizedHeight))
-  const deformers = waveLampDeformers(options.parameters)
-  const vertex: DeformerVertex = {
-    normalizedHeight: t,
-    angle: 0,
-    radius: baseRadius(options.parameters, t),
-    deformationWeight: options.deformationWeight ?? 1,
-  }
+  validateConnectionFrame(options.inputFrame, 'Shade input frame')
   const points = []
   for (let column = 0; column < radialSegments; column += 1) {
-    vertex.normalizedHeight = t
-    vertex.angle = (Math.PI * 2 * column) / radialSegments
-    vertex.radius = baseRadius(options.parameters, t)
-    vertex.deformationWeight = options.deformationWeight ?? 1
-    applyDeformers(vertex, deformers)
-    points.push({ angle: vertex.angle, radius: vertex.radius })
+    const angle = (Math.PI * 2 * column) / radialSegments
+    const point = createShadePoint(options.parameters, options.inputFrame, t, angle, options.deformationWeight)
+    points.push({ angle: point.angle, radius: point.radius })
   }
   return { z: options.inputFrame.position.z + height * t, points }
 }
@@ -109,7 +93,7 @@ export function generateWaveLampMesh(
   lampComposition?: WaveLampComposition,
 ): MeshData {
   const height = parameterNumber(parameters, 'height')
-  const maxRadius = parameterNumber(parameters, 'maxDiameter') / 2
+  const maxRadius = parameterNumber(parameters, 'bottomDiameter', 'maxDiameter') / 2
   const wallThickness = parameterNumber(parameters, 'wallThickness')
   const verticalSegments = parameterNumber(parameters, 'verticalSegments')
   const radialSegments = parameterNumber(parameters, 'radialSegments')
@@ -122,28 +106,23 @@ export function generateWaveLampMesh(
   const shadeInputFrame = lampComposition?.shadeInputFrame ?? createConnectionFrame(0, maxRadius)
   validateConnectionFrame(shadeInputFrame, 'Shade input frame')
   const shadeStartZ = shadeInputFrame.position.z
-  const deformers = waveLampDeformers(parameters)
   const rowIndex = (row: number, column: number) => row * radialSegments + (column % radialSegments + radialSegments) % radialSegments
   const outerIndex = (row: number, column: number) => rowIndex(row, column)
   const innerIndex = (row: number, column: number) => ringVertexCount + rowIndex(row, column)
-  const vertex: DeformerVertex = { normalizedHeight: 0, angle: 0, radius: maxRadius, deformationWeight: 1 }
 
   for (let row = 0; row < rows; row += 1) {
     const t = row / verticalSegments
     const z = shadeStartZ + height * t
     for (let column = 0; column < radialSegments; column += 1) {
-      vertex.normalizedHeight = t
-      vertex.angle = (Math.PI * 2 * column) / radialSegments
-      vertex.radius = baseRadius(parameters, t)
-      applyDeformers(vertex, deformers)
-
-      const radius = vertex.radius
-      if (radius <= wallThickness) throw new Error('Wave amplitude too large for current wall thickness.')
-      const cosAngle = Math.cos(vertex.angle)
-      const sinAngle = Math.sin(vertex.angle)
+      const angle = (Math.PI * 2 * column) / radialSegments
+      const point = createShadePoint(parameters, shadeInputFrame, t, angle)
+      const radius = point.radius
+      if (radius <= wallThickness || point.innerRadius <= 0) throw new Error('Wave amplitude too large for current wall thickness.')
+      const cosAngle = Math.cos(point.angle)
+      const sinAngle = Math.sin(point.angle)
       const outer = outerIndex(row, column)
       const inner = innerIndex(row, column)
-      const innerRadius = radius - wallThickness
+      const innerRadius = point.innerRadius
 
       positions[outer * 3] = cosAngle * radius
       positions[outer * 3 + 1] = sinAngle * radius
