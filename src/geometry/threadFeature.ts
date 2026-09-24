@@ -1,27 +1,41 @@
 import type {
   NumberParameterDefinition,
   ParameterDefinition,
-  ParameterValues,
   SelectParameterDefinition,
   ValidationResult,
 } from '../parametric/types'
+import {
+  deriveThreadTurns,
+  threadSpecFromLegacy,
+  validateThreadSpec,
+  type ThreadHandedness,
+  type ThreadProfileType,
+  type ThreadSpec,
+} from './threadSpec'
 
-export type ThreadDirection = 'right' | 'left'
+export type ThreadDirection = ThreadHandedness
 
-export interface ThreadFeatureParameters extends ParameterValues {
-  diameter: number
-  pitch: number
-  length: number
-  profileDepth: number
-  direction: ThreadDirection
+export interface ThreadFeatureParameters {
+  [key: string]: unknown
+  threadSpec?: ThreadSpec
+  diameter?: number
+  pitch?: number
+  length?: number
+  profileDepth?: number
+  direction?: ThreadDirection
   internal: boolean
-  clearance: number
+  clearance?: number
 }
 
 export interface ThreadFeatureGeometry {
   majorRadius: number
   minorRadius: number
   length: number
+  turns: number
+  depth: number
+  clearance: number
+  handedness: ThreadHandedness
+  profileType: ThreadProfileType
   radiusAt(distance: number, angle: number): number
 }
 
@@ -57,7 +71,7 @@ const directionParameter: SelectParameterDefinition = {
 const threadFeatureParameters: readonly ParameterDefinition[] = [
   numberParameter('diameter', 'Diameter', 'Nominal thread diameter.', 0.01, 500, 0.1),
   numberParameter('pitch', 'Pitch', 'Axial distance between thread turns.', 0.01, 100, 0.1),
-  numberParameter('length', 'Length', 'Axial length of the threaded feature.', 0.01, 500, 0.1),
+  numberParameter('length', 'Length', 'Length of the threaded feature.', 0.01, 500, 0.1),
   numberParameter('profileDepth', 'Profile depth', 'Radial depth of the triangular thread profile.', 0.001, 50, 0.05),
   directionParameter,
   {
@@ -69,62 +83,62 @@ const threadFeatureParameters: readonly ParameterDefinition[] = [
   numberParameter('clearance', 'Clearance', 'Radial manufacturing clearance.', 0, 20, 0.05),
 ]
 
+function legacySpec(parameters: ThreadFeatureParameters): ThreadSpec {
+  return threadSpecFromLegacy({
+    nominalDiameter: Number(parameters.diameter),
+    pitch: Number(parameters.pitch),
+    length: Number(parameters.length),
+    depth: Number(parameters.profileDepth),
+    clearance: Number(parameters.clearance),
+    handedness: parameters.direction,
+  })
+}
+
+function resolveSpec(parameters: ThreadFeatureParameters): ThreadSpec {
+  return parameters.threadSpec ?? legacySpec(parameters)
+}
+
 export function validateThreadFeature(parameters: ThreadFeatureParameters): ValidationResult {
   const errors: string[] = []
-  const diameter = Number(parameters.diameter)
-  const pitch = Number(parameters.pitch)
-  const length = Number(parameters.length)
-  const profileDepth = Number(parameters.profileDepth)
-  const clearance = Number(parameters.clearance)
-
-  if (!Number.isFinite(diameter) || diameter <= 0) errors.push('Thread diameter must be greater than zero.')
-  if (!Number.isFinite(pitch) || pitch <= 0) errors.push('Thread pitch must be greater than zero.')
-  if (!Number.isFinite(length) || length <= 0) errors.push('Thread length must be greater than zero.')
-  if (!Number.isFinite(profileDepth) || profileDepth <= 0) {
-    errors.push('Thread profile depth must be greater than zero.')
+  let spec: ThreadSpec
+  try {
+    spec = resolveSpec(parameters)
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : 'Thread parameters are invalid.')
+    return { valid: false, errors }
   }
-  if (!Number.isFinite(clearance) || clearance < 0) errors.push('Thread clearance cannot be negative.')
-  if (parameters.direction !== 'right' && parameters.direction !== 'left') {
-    errors.push('Thread direction must be right or left.')
-  }
+  errors.push(...validateThreadSpec(spec).errors)
   if (typeof parameters.internal !== 'boolean') errors.push('Thread internal must be a boolean.')
-  if (Number.isFinite(profileDepth) && Number.isFinite(diameter) && profileDepth >= diameter / 2) {
-    errors.push('Thread profile depth must be less than the thread radius.')
+  if (!Number.isFinite(spec.nominalDiameter) || spec.nominalDiameter <= 0) {
+    errors.push('Thread diameter must be greater than zero.')
   }
-  if (Number.isFinite(clearance) && Number.isFinite(pitch) && clearance > pitch / 2) {
-    errors.push('Thread clearance is too large for the selected pitch.')
-  }
-  if (!parameters.internal && Number.isFinite(clearance) && Number.isFinite(diameter) && clearance >= diameter / 2) {
-    errors.push('External thread clearance must be smaller than the thread radius.')
-  }
-
   return { valid: errors.length === 0, errors }
 }
 
 function createThreadGeometry(parameters: ThreadFeatureParameters): ThreadFeatureGeometry {
-  const diameter = Number(parameters.diameter)
-  const pitch = Number(parameters.pitch)
-  const length = Number(parameters.length)
-  const profileDepth = Number(parameters.profileDepth)
-  const clearance = Number(parameters.clearance)
-  const externalMajorRadius = diameter / 2 - clearance
-  const majorRadius = parameters.internal ? diameter / 2 + clearance : externalMajorRadius
-  const minorRadius = parameters.internal ? majorRadius : majorRadius - profileDepth
-  const directionSign = parameters.direction === 'left' ? -1 : 1
+  const spec = resolveSpec(parameters)
+  const directionSign = spec.handedness === 'left' ? -1 : 1
+  const externalMinorRadius = spec.nominalDiameter / 2 - spec.depth
+  const externalMajorRadius = spec.nominalDiameter / 2
+  const internalMinorRadius = spec.nominalDiameter / 2 + spec.clearance
+  const internalMajorRadius = internalMinorRadius + spec.depth
 
   return {
-    majorRadius,
-    minorRadius,
-    length,
+    majorRadius: parameters.internal ? internalMajorRadius : externalMajorRadius,
+    minorRadius: parameters.internal ? internalMinorRadius : externalMinorRadius,
+    length: spec.length,
+    turns: deriveThreadTurns(spec),
+    depth: spec.depth,
+    clearance: spec.clearance,
+    handedness: spec.handedness,
+    profileType: spec.profileType,
     radiusAt(distance, angle) {
-      const axialTurns = distance / pitch
-      const angularTurns = (directionSign * angle) / (Math.PI * 2)
-      const phase = axialTurns + angularTurns
+      const phase = distance / spec.pitch + (directionSign * angle) / (Math.PI * 2)
       const fraction = phase - Math.floor(phase)
       const ridge = fraction <= 0.5 ? fraction * 2 : (1 - fraction) * 2
       return parameters.internal
-        ? majorRadius + profileDepth * ridge
-        : minorRadius + profileDepth * ridge
+        ? internalMajorRadius - spec.depth * ridge
+        : externalMinorRadius + spec.depth * ridge
     },
   }
 }

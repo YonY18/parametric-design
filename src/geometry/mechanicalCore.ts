@@ -1,4 +1,5 @@
 import type { ValidationResult } from '../parametric/types'
+import { createThreadSpec, threadSpecFromLegacy, validateThreadSpec, type ThreadHandedness, type ThreadProfileType, type ThreadSpec } from './threadSpec'
 import type { RetainingRingParameters } from './retainingRing'
 import type { ThreadedHubParameters } from './threadedHub'
 import type { InternalShadeSupportParameters } from './internalShadeSupport'
@@ -7,9 +8,14 @@ export type MechanicalMountType = 'none' | 'threaded'
 
 export interface MechanicalCoreInput {
   mountType: MechanicalMountType
-  nominalThreadDiameter: number
-  threadPitch: number
-  threadClearance: number
+  threadSpec?: ThreadSpec
+  nominalThreadDiameter?: number
+  threadPitch?: number
+  threadLength?: number
+  threadDepth?: number
+  threadClearance?: number
+  threadHandedness?: ThreadHandedness
+  threadProfileType?: ThreadProfileType
   cableHoleDiameter: number
   supportInset: number
   supportThickness: number
@@ -38,6 +44,7 @@ export interface MechanicalCoreDimensions {
 }
 
 export interface MechanicalCoreParameters {
+  threadSpec: ThreadSpec
   dimensions: MechanicalCoreDimensions
   hub: ThreadedHubParameters
   ring: RetainingRingParameters
@@ -50,17 +57,32 @@ function finite(value: number): boolean {
   return Number.isFinite(value)
 }
 
+function resolveThreadSpec(input: MechanicalCoreInput): ThreadSpec {
+  if (input.threadSpec) return createThreadSpec(input.threadSpec)
+  return threadSpecFromLegacy({
+    nominalDiameter: Number(input.nominalThreadDiameter),
+    pitch: Number(input.threadPitch),
+    length: input.threadLength,
+    depth: input.threadDepth,
+    clearance: input.threadClearance,
+    handedness: input.threadHandedness,
+    profileType: input.threadProfileType,
+  })
+}
+
 export function deriveMechanicalCoreDimensions(input: MechanicalCoreInput): MechanicalCoreDimensions {
-  const minimumWallThickness = Math.max(2, input.threadPitch)
-  const hubSafetyOffset = Math.max(0.25, input.threadClearance)
-  const hubOpeningDiameter = input.nominalThreadDiameter + input.threadClearance * 2
-  const hubOuterDiameter = hubOpeningDiameter + minimumWallThickness * 2
-  const hubHeight = Math.max(10, input.threadPitch * 6)
+  const threadSpec = resolveThreadSpec(input)
+  const minimumWallThickness = Math.max(2, threadSpec.pitch)
+  const hubSafetyOffset = Math.max(0.25, threadSpec.clearance)
+  const hubOpeningDiameter = Math.max(0.1, input.cableHoleDiameter)
+  const hubOuterDiameter = threadSpec.nominalDiameter
+  const hubHeight = Math.max(10, threadSpec.length)
+  const hubWallThickness = (hubOuterDiameter - hubOpeningDiameter) / 2
+  const ringInnerDiameter = threadSpec.nominalDiameter + 2 * (threadSpec.clearance + threadSpec.depth)
   const ringWallThickness = minimumWallThickness
-  const ringInnerDiameter = hubOpeningDiameter
   const ringOuterDiameter = ringInnerDiameter + ringWallThickness * 2
-  const ringHeight = Math.max(6, input.threadPitch * 4)
-  const supportInnerDiameter = hubOuterDiameter + supportSafetyOffset
+  const ringHeight = Math.max(6, threadSpec.length)
+  const supportInnerDiameter = hubOuterDiameter + minimumWallThickness * 2 + supportSafetyOffset
   const supportOuterDiameter = Math.max(
     supportInnerDiameter + supportSafetyOffset * 2,
     input.maxDiameter !== undefined && finite(input.maxDiameter)
@@ -71,7 +93,7 @@ export function deriveMechanicalCoreDimensions(input: MechanicalCoreInput): Mech
   return {
     hubOuterDiameter,
     hubHeight,
-    hubWallThickness: minimumWallThickness,
+    hubWallThickness,
     hubOpeningDiameter,
     hubSafetyOffset,
     ringInnerDiameter,
@@ -83,7 +105,7 @@ export function deriveMechanicalCoreDimensions(input: MechanicalCoreInput): Mech
     supportOuterDiameter,
     supportSafetyOffset,
     minimumWallThickness,
-    threadLength: hubHeight,
+    threadLength: threadSpec.length,
   }
 }
 
@@ -94,18 +116,16 @@ export function validateMechanicalCoreInput(input: MechanicalCoreInput): Validat
   }
   if (input.mountType === 'none') return { valid: errors.length === 0, errors }
 
-  if (!finite(input.nominalThreadDiameter) || input.nominalThreadDiameter < 8 || input.nominalThreadDiameter > 80) {
-    errors.push('Thread diameter must be between 8 and 80 mm.')
+  let threadSpec: ThreadSpec
+  try {
+    threadSpec = resolveThreadSpec(input)
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : 'Thread specification is invalid.')
+    return { valid: false, errors }
   }
-  if (!finite(input.threadPitch) || input.threadPitch < 0.5 || input.threadPitch > 8) {
-    errors.push('Thread pitch must be between 0.5 and 8 mm.')
-  }
-  if (!finite(input.threadClearance) || input.threadClearance < 0 || input.threadClearance > input.threadPitch / 2) {
-    errors.push('Thread clearance is too large for selected pitch.')
-  }
+  errors.push(...validateThreadSpec(threadSpec).errors)
   if (!finite(input.cableHoleDiameter) || input.cableHoleDiameter < 0
-    || (finite(input.nominalThreadDiameter) && finite(input.threadClearance)
-      && input.cableHoleDiameter >= input.nominalThreadDiameter + input.threadClearance * 2)) {
+    || input.cableHoleDiameter >= threadSpec.nominalDiameter) {
     errors.push('Cable hole too large for selected hub.')
   }
   if (!finite(input.wallThickness) || input.wallThickness <= 0) {
@@ -126,9 +146,8 @@ export function validateMechanicalCoreInput(input: MechanicalCoreInput): Validat
 
   if (errors.length === 0) {
     const dimensions = deriveMechanicalCoreDimensions(input)
-    const ringThreadLength = Math.max(input.threadPitch * 3, dimensions.ringHeight - input.threadPitch)
-    const engagement = Math.min(dimensions.threadLength, ringThreadLength)
-    if (engagement < input.threadPitch) errors.push('Retaining ring engagement is insufficient.')
+    const engagement = Math.min(dimensions.threadLength, dimensions.ringHeight)
+    if (engagement < threadSpec.pitch) errors.push('Retaining ring engagement is insufficient.')
   }
 
   return { valid: errors.length === 0, errors }
@@ -137,18 +156,22 @@ export function validateMechanicalCoreInput(input: MechanicalCoreInput): Validat
 export function deriveMechanicalCore(input: MechanicalCoreInput): MechanicalCoreParameters {
   const validation = validateMechanicalCoreInput(input)
   if (!validation.valid) throw new Error(validation.errors.join(' '))
+  const threadSpec = resolveThreadSpec(input)
   const dimensions = deriveMechanicalCoreDimensions(input)
   return {
+    threadSpec,
     dimensions,
     hub: {
       hubOuterDiameter: dimensions.hubOuterDiameter,
       hubHeight: dimensions.hubHeight,
       hubWallThickness: dimensions.hubWallThickness,
-      threadDiameter: input.nominalThreadDiameter,
-      threadPitch: input.threadPitch,
-      threadLength: dimensions.threadLength,
-      threadClearance: input.threadClearance,
-      threadDirection: 'right',
+      hubOpeningDiameter: dimensions.hubOpeningDiameter,
+      threadSpec,
+      threadDiameter: threadSpec.nominalDiameter,
+      threadPitch: threadSpec.pitch,
+      threadLength: threadSpec.length,
+      threadClearance: threadSpec.clearance,
+      threadDirection: threadSpec.handedness,
       radialSegments: input.radialSegments,
     },
     ring: {
@@ -156,11 +179,12 @@ export function deriveMechanicalCore(input: MechanicalCoreInput): MechanicalCore
       innerDiameter: dimensions.ringInnerDiameter,
       height: dimensions.ringHeight,
       wallThickness: dimensions.ringWallThickness,
-      threadDiameter: input.nominalThreadDiameter,
-      threadPitch: input.threadPitch,
-      threadLength: Math.max(input.threadPitch * 3, dimensions.ringHeight - input.threadPitch),
-      threadClearance: input.threadClearance,
-      threadDirection: 'right',
+      threadSpec,
+      threadDiameter: threadSpec.nominalDiameter,
+      threadPitch: threadSpec.pitch,
+      threadLength: threadSpec.length,
+      threadClearance: threadSpec.clearance,
+      threadDirection: threadSpec.handedness,
       gripStyle: 'smooth',
       gripDepth: 0,
       gripCount: 12,
