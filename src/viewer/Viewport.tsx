@@ -78,12 +78,13 @@ function createDebugMarker(frame: ConnectionFrame, color: string): THREE.Group {
 
 const debugColors = ['#f2b76d', '#83e3ce', '#e889d4', '#7dc8ff']
 const partColors: Record<string, string> = {
+  base: '#55c7b0',
+  'test-rim': '#d89a68',
   'decorative-shade': '#55c7b0',
-  'internal-support': '#9dd4c5',
-  'threaded-hub': '#d89a68',
-  'retaining-ring': '#83e3ce',
+  'lamp-holder-reference': '#d89a68',
 }
-const mechanicalPartIds = new Set(['threaded-hub', 'internal-support', 'retaining-ring'])
+const baseTestPartIds = new Set(['base', 'test-rim'])
+const waveLampPartIds = new Set(['base', 'decorative-shade', 'lamp-holder-reference'])
 
 export function Viewport({ mesh, status, error }: ViewportProps) {
   const mountRef = useRef<HTMLDivElement>(null)
@@ -91,14 +92,16 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
   const geometryRef = useRef<THREE.BufferGeometry | null>(null)
   const partsGroupRef = useRef<THREE.Group | null>(null)
   const debugGroupRef = useRef<THREE.Group | null>(null)
+  const sectionPlaneRef = useRef<THREE.Plane | null>(null)
   const fitTargetRef = useRef<THREE.Group | null>(null)
   const fitRef = useRef<() => void>(() => undefined)
   const hasRenderedMeshRef = useRef(false)
   const [debugConnections, setDebugConnections] = useState(false)
   const [explodedView, setExplodedView] = useState(false)
-  const [showMechanicalParts, setShowMechanicalParts] = useState(true)
-  const [showRetainingRing, setShowRetainingRing] = useState(true)
-  const [mechanicalCutaway, setMechanicalCutaway] = useState(false)
+  const [showBase, setShowBase] = useState(true)
+  const [showShade, setShowShade] = useState(true)
+  const [showHolder, setShowHolder] = useState(true)
+  const [sectionView, setSectionView] = useState(false)
 
   useEffect(() => {
     const mount = mountRef.current
@@ -110,6 +113,7 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
     camera.position.set(110, -130, 90)
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+    renderer.localClippingEnabled = true
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping = THREE.ACESFilmicToneMapping
@@ -139,11 +143,14 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
     const partsGroup = new THREE.Group()
     const debugGroup = new THREE.Group()
     const geometry = new THREE.BufferGeometry()
+    const sectionPlane = new THREE.Plane(new THREE.Vector3(1, 0, 0), 0)
+    sectionPlaneRef.current = sectionPlane
     const material = new THREE.MeshStandardMaterial({
       color: '#55c7b0',
       roughness: 0.3,
       metalness: 0.08,
       side: THREE.DoubleSide,
+      clippingPlanes: [],
     })
     const modelMesh = new THREE.Mesh(geometry, material)
     modelMesh.castShadow = true
@@ -208,6 +215,7 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
       geometryRef.current = null
       partsGroupRef.current = null
       debugGroupRef.current = null
+      sectionPlaneRef.current = null
       fitTargetRef.current = null
       fitRef.current = () => undefined
     }
@@ -217,7 +225,8 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
     const modelMesh = meshRef.current
     const partsGroup = partsGroupRef.current
     const debugGroup = debugGroupRef.current
-    if (!modelMesh || !partsGroup || !debugGroup) return
+    const sectionPlane = sectionPlaneRef.current
+    if (!modelMesh || !partsGroup || !debugGroup || !sectionPlane) return
 
     disposeObjectResources(partsGroup)
     partsGroup.clear()
@@ -233,18 +242,22 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
     const previousGeometry = geometryRef.current
     modelMesh.geometry = nextGeometry
     geometryRef.current = nextGeometry
+    const modelMaterial = modelMesh.material as THREE.MeshStandardMaterial
+    modelMaterial.clippingPlanes = sectionView ? [sectionPlane] : []
 
     const parts = mesh.parts ?? []
-    const renderParts = parts.length > 0 && (explodedView || mechanicalCutaway || !showMechanicalParts || !showRetainingRing)
+    const isBaseTestAssembly = parts.some((part) => part.id === 'test-rim')
+    const isWaveLampAssembly = parts.some((part) => waveLampPartIds.has(part.id))
+    const renderParts = parts.length > 0 && (isWaveLampAssembly || isBaseTestAssembly || explodedView)
     if (renderParts) {
       modelMesh.visible = false
       const dimensions = getDimensions(mesh)
       const separation = Math.max(12, (dimensions?.z ?? 100) * 0.08)
       parts.forEach((part, index) => {
-        const isMechanical = mechanicalPartIds.has(part.id)
-        const visible = mechanicalCutaway
-          ? isMechanical
-          : (!isMechanical || showMechanicalParts) && (part.id !== 'retaining-ring' || showRetainingRing)
+        const isBaseTestPart = baseTestPartIds.has(part.id)
+        const visible = isWaveLampAssembly
+          ? part.id === 'base' ? showBase : part.id === 'decorative-shade' ? showShade : part.id === 'lamp-holder-reference' ? showHolder : true
+          : true
         const partMesh = new THREE.Mesh(
           createGeometry(part.mesh),
           new THREE.MeshStandardMaterial({
@@ -252,10 +265,11 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
             roughness: 0.3,
             metalness: 0.08,
             side: THREE.DoubleSide,
+            clippingPlanes: sectionView ? [sectionPlane] : [],
           }),
         )
         partMesh.visible = visible
-        partMesh.position.z = explodedView ? index * separation : 0
+        partMesh.position.z = explodedView && (isBaseTestAssembly ? isBaseTestPart : true) ? index * separation : 0
         partMesh.castShadow = true
         partMesh.receiveShadow = true
         partsGroup.add(partMesh)
@@ -278,10 +292,11 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
       hasRenderedMeshRef.current = true
       window.requestAnimationFrame(() => fitRef.current())
     }
-  }, [mesh, debugConnections, explodedView, showMechanicalParts, showRetainingRing, mechanicalCutaway])
+  }, [mesh, debugConnections, explodedView, showBase, showShade, showHolder, sectionView])
 
   const dimensions = mesh ? getDimensions(mesh) : null
   const isLoading = status === 'generating'
+  const isWaveLampAssembly = mesh?.parts?.some((part) => waveLampPartIds.has(part.id)) ?? false
 
   return (
     <section className="viewport-panel">
@@ -299,29 +314,41 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
               <strong>Z {formatDimension(dimensions.z)}</strong>
             </div>
           )}
+          {isWaveLampAssembly && (
+            <>
+              <button
+                aria-pressed={showBase}
+                className={`toggle-button${showBase ? ' is-active' : ''}`}
+                onClick={() => setShowBase((value) => !value)}
+                type="button"
+              >
+                {showBase ? 'Hide Base' : 'Show Base'}
+              </button>
+              <button
+                aria-pressed={showShade}
+                className={`toggle-button${showShade ? ' is-active' : ''}`}
+                onClick={() => setShowShade((value) => !value)}
+                type="button"
+              >
+                {showShade ? 'Hide Shade' : 'Show Shade'}
+              </button>
+              <button
+                aria-pressed={showHolder}
+                className={`toggle-button${showHolder ? ' is-active' : ''}`}
+                onClick={() => setShowHolder((value) => !value)}
+                type="button"
+              >
+                {showHolder ? 'Hide Holder Reference' : 'Show Holder Reference'}
+              </button>
+            </>
+          )}
           <button
-            aria-pressed={showMechanicalParts}
-            className={`toggle-button${showMechanicalParts ? ' is-active' : ''}`}
-            onClick={() => setShowMechanicalParts((value) => !value)}
+            aria-pressed={sectionView}
+            className={`toggle-button${sectionView ? ' is-active' : ''}`}
+            onClick={() => setSectionView((value) => !value)}
             type="button"
           >
-            Show Mechanical Parts
-          </button>
-          <button
-            aria-pressed={showRetainingRing}
-            className={`toggle-button${showRetainingRing ? ' is-active' : ''}`}
-            onClick={() => setShowRetainingRing((value) => !value)}
-            type="button"
-          >
-            {showRetainingRing ? 'Hide Ring' : 'Show Retaining Ring'}
-          </button>
-          <button
-            aria-pressed={mechanicalCutaway}
-            className={`toggle-button${mechanicalCutaway ? ' is-active' : ''}`}
-            onClick={() => setMechanicalCutaway((value) => !value)}
-            type="button"
-          >
-            Mechanical Cutaway
+            Section View
           </button>
           <button
             aria-pressed={debugConnections}
@@ -337,7 +364,7 @@ export function Viewport({ mesh, status, error }: ViewportProps) {
             onClick={() => setExplodedView((value) => !value)}
             type="button"
           >
-            Exploded
+            Exploded View
           </button>
           <span className={`status-indicator status-${status}`}>
             <span className="status-dot" />

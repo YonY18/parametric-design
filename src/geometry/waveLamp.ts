@@ -1,8 +1,11 @@
 import { validateConnectionFrame } from './assembly'
 import {
+  baseSilhouetteRadius,
+  bottomAdaptationEnvelope,
   createDecorativeProfilePoint,
   type DecorativeProfileParameters,
 } from './decorativeProfile'
+import { deriveWaveLampShadeSeat, type WaveLampShadeSeat } from './lampBase'
 import { createConnectionFrame, validateMeshData, type ConnectionFrame, type MeshData, type ProfileRing } from './types'
 import type { ParameterValues } from '../parametric/types'
 
@@ -14,6 +17,8 @@ function parameterNumber(parameters: ParameterValues, id: string, legacyId?: str
 
 export interface WaveLampComposition {
   shadeInputFrame?: ConnectionFrame
+  shadeSeat?: WaveLampShadeSeat
+  adaptationHeight?: number
 }
 
 export interface WaveLampProfileOptions {
@@ -21,10 +26,20 @@ export interface WaveLampProfileOptions {
   inputFrame: ConnectionFrame
   normalizedHeight: number
   deformationWeight?: number
+  shadeSeat?: WaveLampShadeSeat
+  adaptationHeight?: number
 }
 
 function decorativeParameters(parameters: ParameterValues): DecorativeProfileParameters {
   return parameters as DecorativeProfileParameters
+}
+
+function resolvedShadeSeat(parameters: ParameterValues, explicit?: WaveLampShadeSeat): WaveLampShadeSeat {
+  return explicit ?? deriveWaveLampShadeSeat(parameters)
+}
+
+function adaptationHeight(parameters: ParameterValues, explicit?: number): number {
+  return explicit ?? Number(parameters.bottomAdaptationHeight ?? parameters.rimTransitionHeight ?? 8)
 }
 
 function createShadePoint(
@@ -33,15 +48,34 @@ function createShadePoint(
   normalizedHeight: number,
   angle: number,
   deformationWeight = 1,
+  shadeSeat?: WaveLampShadeSeat,
+  explicitAdaptationHeight?: number,
 ) {
-  const mountingEnd = normalizedHeight === 0
+  const height = parameterNumber(parameters, 'height')
+  const t = Math.min(1, Math.max(0, normalizedHeight))
+  const seat = resolvedShadeSeat(parameters, shadeSeat)
+  const collarRadius = shadeSeat ? seat.collarOuterDiameter / 2 : inputFrame.radius
+  const adaptationT = adaptationHeight(parameters, explicitAdaptationHeight) / height
+  if (t <= Math.max(0, adaptationT)) {
+    const envelope = bottomAdaptationEnvelope(t, adaptationT)
+    const bodyRadiusAtAdaptation = baseSilhouetteRadius(parameters, Math.min(1, Math.max(0, adaptationT)))
+    const adaptedRadius = collarRadius + (bodyRadiusAtAdaptation - collarRadius) * envelope
+    return createDecorativeProfilePoint(
+      decorativeParameters(parameters),
+      t,
+      angle,
+      envelope * deformationWeight,
+      adaptedRadius,
+      envelope,
+    )
+  }
   return createDecorativeProfilePoint(
     decorativeParameters(parameters),
-    normalizedHeight,
+    t,
     angle,
-    mountingEnd ? 0 : deformationWeight,
-    mountingEnd ? inputFrame.radius : undefined,
-    mountingEnd ? 0 : 1,
+    deformationWeight,
+    undefined,
+    1,
   )
 }
 
@@ -53,7 +87,15 @@ export function createWaveLampProfileRing(options: WaveLampProfileOptions): Prof
   const points = []
   for (let column = 0; column < radialSegments; column += 1) {
     const angle = (Math.PI * 2 * column) / radialSegments
-    const point = createShadePoint(options.parameters, options.inputFrame, t, angle, options.deformationWeight)
+    const point = createShadePoint(
+      options.parameters,
+      options.inputFrame,
+      t,
+      angle,
+      options.deformationWeight,
+      options.shadeSeat,
+      options.adaptationHeight,
+    )
     points.push({ angle: point.angle, radius: point.radius })
   }
   return { z: options.inputFrame.position.z + height * t, points }
@@ -93,17 +135,18 @@ export function generateWaveLampMesh(
   lampComposition?: WaveLampComposition,
 ): MeshData {
   const height = parameterNumber(parameters, 'height')
-  const maxRadius = parameterNumber(parameters, 'bottomDiameter', 'maxDiameter') / 2
   const wallThickness = parameterNumber(parameters, 'wallThickness')
   const verticalSegments = parameterNumber(parameters, 'verticalSegments')
   const radialSegments = parameterNumber(parameters, 'radialSegments')
+  const shadeSeat = resolvedShadeSeat(parameters, lampComposition?.shadeSeat)
 
   const rows = verticalSegments + 1
   const ringVertexCount = rows * radialSegments
   const vertexCount = ringVertexCount * 2
   const positions = new Float32Array(vertexCount * 3)
   const indices: number[] = []
-  const shadeInputFrame = lampComposition?.shadeInputFrame ?? createConnectionFrame(0, maxRadius)
+  const shadeInputFrame = lampComposition?.shadeInputFrame
+    ?? createConnectionFrame(0, shadeSeat.collarOuterDiameter / 2)
   validateConnectionFrame(shadeInputFrame, 'Shade input frame')
   const shadeStartZ = shadeInputFrame.position.z
   const rowIndex = (row: number, column: number) => row * radialSegments + (column % radialSegments + radialSegments) % radialSegments
@@ -115,7 +158,15 @@ export function generateWaveLampMesh(
     const z = shadeStartZ + height * t
     for (let column = 0; column < radialSegments; column += 1) {
       const angle = (Math.PI * 2 * column) / radialSegments
-      const point = createShadePoint(parameters, shadeInputFrame, t, angle)
+      const point = createShadePoint(
+        parameters,
+        shadeInputFrame,
+        t,
+        angle,
+        1,
+        shadeSeat,
+        lampComposition?.adaptationHeight,
+      )
       const radius = point.radius
       if (radius <= wallThickness || point.innerRadius <= 0) throw new Error('Wave amplitude too large for current wall thickness.')
       const cosAngle = Math.cos(point.angle)

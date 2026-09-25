@@ -55,6 +55,12 @@ export function smootherstep(value: number): number {
   return t * t * t * (t * (t * 6 - 15) + 10)
 }
 
+/** Returns zero at the collar and one at the end of the lower adaptation zone. */
+export function bottomAdaptationEnvelope(normalizedHeight: number, adaptationHeight: number): number {
+  if (!Number.isFinite(adaptationHeight) || adaptationHeight <= 0) return normalizedHeight > 0 ? 1 : 0
+  return smootherstep(normalizedHeight / adaptationHeight)
+}
+
 function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): number {
   const t2 = t * t
   const t3 = t2 * t
