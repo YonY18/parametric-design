@@ -1,4 +1,10 @@
 import type { GeometryRequest } from '../geometry/types'
+import {
+  deriveWaveLampShadeSeat,
+  validateLampBaseParameters,
+  type LampBaseParameters,
+  type WaveLampSeatMode,
+} from '../geometry/lampBase'
 import type {
   NumberParameterDefinition,
   ParameterDefinition,
@@ -6,10 +12,13 @@ import type {
   ParameterSection,
   ParameterValues,
   ParametricModelDefinition,
+  SelectParameterDefinition,
   ValidationResult,
 } from '../parametric/types'
 
-export type WaveLampParameterValues = ParameterValues & {
+export type WaveLampBaseType = WaveLampSeatMode
+
+export type DecorativeParameters = ParameterValues & {
   height: number
   bottomDiameter: number
   topDiameter: number
@@ -17,27 +26,36 @@ export type WaveLampParameterValues = ParameterValues & {
   waves: number
   amplitude: number
   twist: number
-  rimDiameter: number
-  rimHeight: number
-  rimThickness: number
-  rimLipDepth: number
-  rimClearance: number
+  bottomAdaptationHeight: number
   verticalSegments: number
   radialSegments: number
-  // Accepted for saved models created before the reduced contract.
   patternCount?: number
   patternAmplitude?: number
   waveAmplitude?: number
   twistAngle?: number
-  rimFitClearance?: number
 }
+
+export type BaseParameters = ParameterValues & {
+  baseDiameter: number
+  baseThickness: number
+  bottomThickness: number
+  seatMode: WaveLampSeatMode
+  fitClearance: number
+  pedestalDiameter: number
+  pedestalHeight: number
+  holderOpeningDiameter: number
+  cableChannelWidth: number
+  cableChannelDepth: number
+}
+
+export type WaveLampParameterValues = DecorativeParameters & BaseParameters
 
 const numberParameter = (
   id: string,
   label: string,
   description: string,
   min: number,
-  max: number,
+  max: number | ((values: ParameterValues) => number),
   step: number,
   unit = 'mm',
   integer = false,
@@ -53,22 +71,39 @@ const numberParameter = (
   ...(integer ? { integer: true } : {}),
 })
 
+const seatModeParameter: SelectParameterDefinition = {
+  id: 'seatMode',
+  label: 'Shade seat',
+  description: 'Choose the peripheral circular seat used by the shade collar.',
+  type: 'select',
+  options: [
+    { value: 'recessed-seat', label: 'Recessed Seat' },
+    { value: 'raised-lip', label: 'Raised Lip' },
+  ],
+}
+
 const shadeParameters: readonly ParameterDefinition[] = [
   numberParameter('height', 'Height', 'Overall height of the decorative shade.', 50, 500, 1),
-  numberParameter('bottomDiameter', 'Bottom diameter', 'Body diameter at the lower end of the shade.', 40, 400, 1),
+  numberParameter('bottomDiameter', 'Bottom diameter', 'Decorative shade body diameter before the circular collar adaptation.', 40, 400, 1),
   numberParameter('topDiameter', 'Top diameter', 'Outside diameter at the upper end of the shade.', 40, 400, 1),
   numberParameter('wallThickness', 'Wall thickness', 'Radial material thickness of the shade.', 0.4, 10, 0.1),
   numberParameter('waves', 'Waves', 'Number of radial decorative waves.', 3, 64, 1, 'count', true),
   numberParameter('amplitude', 'Amplitude', 'Radial wave amplitude as a percentage of the local radius.', 0, 40, 0.5, '%'),
   numberParameter('twist', 'Twist', 'Progressive twist from the mounting end to the top.', -360, 360, 1, 'deg'),
+  numberParameter('bottomAdaptationHeight', 'Bottom adaptation', 'Height of the final smootherstep transition into the circular collar.', 1, 100, 0.5),
 ]
 
-const rimParameters: readonly ParameterDefinition[] = [
-  numberParameter('rimDiameter', 'Diameter', 'Outer diameter of the independent circular rim interface.', 40, 400, 1),
-  numberParameter('rimHeight', 'Height', 'Axial height of the circular rim interface.', 0.5, 40, 0.1),
-  numberParameter('rimThickness', 'Thickness', 'Radial wall thickness of the rim interface.', 0.4, 20, 0.1),
-  numberParameter('rimLipDepth', 'Lip depth', 'Radial depth of the circular retaining lip.', 0, 20, 0.1),
-  numberParameter('rimClearance', 'Clearance', 'Fit clearance retained by the independent rim interface.', 0, 4, 0.05),
+const baseParameters: readonly ParameterDefinition[] = [
+  seatModeParameter,
+  numberParameter('baseDiameter', 'Base diameter', 'Outside diameter of the solid low plinth.', 40, 400, 1),
+  numberParameter('baseThickness', 'Base thickness', 'Total height of the structural plinth.', 1, 100, 0.5),
+  numberParameter('bottomThickness', 'Bottom thickness', 'Solid floor left below the local cable passage.', 0.5, 50, 0.5),
+  numberParameter('fitClearance', 'Fit clearance', 'Radial clearance applied between the circular collar and peripheral seat.', 0, 2, 0.05),
+  numberParameter('pedestalDiameter', 'Pedestal diameter', 'Independent central pedestal outside diameter.', 4, 120, 1),
+  numberParameter('pedestalHeight', 'Pedestal height', 'Height of the central lamp-holder pedestal.', 1, 80, 0.5),
+  numberParameter('holderOpeningDiameter', 'Holder opening', 'Central pedestal opening used by the holder reference.', 1, 100, 0.5),
+  numberParameter('cableChannelWidth', 'Cable channel width', 'Width of the local radial cable passage.', 1, 40, 0.5),
+  numberParameter('cableChannelDepth', 'Cable channel depth', 'Depth of the local cable passage while preserving the bottom floor.', 0.5, 40, 0.5),
 ]
 
 const resolutionParameters: readonly NumberParameterDefinition[] = [
@@ -78,7 +113,7 @@ const resolutionParameters: readonly NumberParameterDefinition[] = [
 
 const waveLampParameters: readonly ParameterDefinition[] = [
   ...shadeParameters,
-  ...rimParameters,
+  ...baseParameters,
   ...resolutionParameters,
 ]
 
@@ -86,17 +121,19 @@ const waveLampParameterSchema: readonly ParameterSection[] = [
   {
     id: 'decorative-shade',
     label: 'Decorative Shade',
-    description: 'The shade is an independent decorative body with a circular mounting end.',
+    description: 'Wave and twist remain unchanged above the lower circular adaptation zone.',
     groups: [
       { id: 'shade', label: 'Shade', parameters: shadeParameters },
       { id: 'resolution', label: 'Resolution', parameters: resolutionParameters },
     ] satisfies readonly ParameterGroup[],
   },
   {
-    id: 'rim-interface',
-    label: 'Rim Interface',
-    description: 'A fully circular interface independent from all shade deformers.',
-    parameters: rimParameters,
+    id: 'base-holder',
+    label: 'Base / Holder',
+    description: 'A solid plinth has a peripheral shade seat and an independent central holder pedestal.',
+    groups: [
+      { id: 'base', label: 'Base', parameters: baseParameters },
+    ] satisfies readonly ParameterGroup[],
   },
 ]
 
@@ -108,11 +145,17 @@ const waveLampDefaults: WaveLampParameterValues = {
   waves: 8,
   amplitude: 5,
   twist: 35,
-  rimDiameter: 116.8,
-  rimHeight: 6,
-  rimThickness: 2,
-  rimLipDepth: 1,
-  rimClearance: 0.4,
+  bottomAdaptationHeight: 8,
+  seatMode: 'recessed-seat',
+  baseDiameter: 120,
+  baseThickness: 8,
+  bottomThickness: 3,
+  fitClearance: 0.25,
+  pedestalDiameter: 30,
+  pedestalHeight: 18,
+  holderOpeningDiameter: 12,
+  cableChannelWidth: 8,
+  cableChannelDepth: 4,
   verticalSegments: 100,
   radialSegments: 128,
 }
@@ -123,11 +166,9 @@ const createWaveLampRequest = (parameters: WaveLampParameterValues): GeometryReq
   parameters,
 })
 
-function value(parameters: ParameterValues, id: string, aliases: readonly string[] = []): ParameterValue | undefined {
+function value(parameters: ParameterValues, id: string, aliases: readonly string[] = []): ParameterValues[string] | undefined {
   return parameters[id] ?? aliases.map((alias) => parameters[alias]).find((candidate) => candidate !== undefined)
 }
-
-type ParameterValue = ParameterValues[string]
 
 function numberValue(
   parameters: ParameterValues,
@@ -139,6 +180,40 @@ function numberValue(
   return Number.isFinite(candidate) ? candidate : fallback
 }
 
+export function waveLampDecorativeParameters(parameters: WaveLampParameterValues): DecorativeParameters {
+  return {
+    height: numberValue(parameters, 'height'),
+    bottomDiameter: numberValue(parameters, 'bottomDiameter', ['maxDiameter']),
+    topDiameter: numberValue(parameters, 'topDiameter'),
+    wallThickness: numberValue(parameters, 'wallThickness'),
+    waves: numberValue(parameters, 'waves', ['patternCount']),
+    amplitude: numberValue(parameters, 'amplitude', ['patternAmplitude', 'waveAmplitude']),
+    twist: numberValue(parameters, 'twist', ['twistAngle']),
+    bottomAdaptationHeight: numberValue(parameters, 'bottomAdaptationHeight', ['rimTransitionHeight'], 8),
+    verticalSegments: numberValue(parameters, 'verticalSegments'),
+    radialSegments: numberValue(parameters, 'radialSegments'),
+  }
+}
+
+export function waveLampBaseParameters(parameters: WaveLampParameterValues): LampBaseParameters {
+  return {
+    baseDiameter: numberValue(parameters, 'baseDiameter'),
+    baseThickness: numberValue(parameters, 'baseThickness'),
+    bottomThickness: numberValue(parameters, 'bottomThickness'),
+    seatMode: parameters.seatMode,
+    fitClearance: numberValue(parameters, 'fitClearance'),
+    pedestalDiameter: numberValue(parameters, 'pedestalDiameter'),
+    pedestalHeight: numberValue(parameters, 'pedestalHeight'),
+    holderOpeningDiameter: numberValue(parameters, 'holderOpeningDiameter'),
+    cableChannelWidth: numberValue(parameters, 'cableChannelWidth'),
+    cableChannelDepth: numberValue(parameters, 'cableChannelDepth'),
+    radialSegments: numberValue(parameters, 'radialSegments'),
+    shadeSeat: deriveWaveLampShadeSeat(parameters),
+  }
+}
+
+export { deriveWaveLampShadeSeat }
+
 function validateWaveLamp(parameters: WaveLampParameterValues): ValidationResult {
   const errors: string[] = []
   const height = numberValue(parameters, 'height')
@@ -148,14 +223,7 @@ function validateWaveLamp(parameters: WaveLampParameterValues): ValidationResult
   const waves = numberValue(parameters, 'waves', ['patternCount'])
   const amplitude = numberValue(parameters, 'amplitude', ['patternAmplitude', 'waveAmplitude'])
   const twist = numberValue(parameters, 'twist', ['twistAngle'])
-  const rimHeight = numberValue(parameters, 'rimHeight')
-  const rimThickness = numberValue(parameters, 'rimThickness')
-  const rimLipDepth = numberValue(parameters, 'rimLipDepth')
-  const rimClearance = numberValue(parameters, 'rimClearance', ['rimFitClearance'], 0.4)
-  const requestedRimDiameter = numberValue(parameters, 'rimDiameter')
-  const rimDiameter = Number.isFinite(requestedRimDiameter)
-    ? requestedRimDiameter
-    : bottomDiameter - 2 * (wallThickness + rimClearance)
+  const adaptationHeight = numberValue(parameters, 'bottomAdaptationHeight', ['rimTransitionHeight'])
   const verticalSegments = numberValue(parameters, 'verticalSegments')
   const radialSegments = numberValue(parameters, 'radialSegments')
 
@@ -166,29 +234,20 @@ function validateWaveLamp(parameters: WaveLampParameterValues): ValidationResult
   if (!Number.isInteger(waves) || waves < 3 || waves > 64) errors.push('Waves must be an integer between 3 and 64.')
   if (!Number.isFinite(amplitude) || amplitude < 0 || amplitude > 40) errors.push('Amplitude must be between 0 and 40 percent.')
   if (!Number.isFinite(twist) || twist < -360 || twist > 360) errors.push('Twist must be between -360 and 360 degrees.')
-  if (!Number.isFinite(rimDiameter) || rimDiameter < 40 || rimDiameter > 400) errors.push('Rim diameter must be between 40 and 400 mm.')
-  if (!Number.isFinite(rimHeight) || rimHeight < 0.5 || rimHeight > 40) errors.push('Rim height must be between 0.5 and 40 mm.')
-  if (!Number.isFinite(rimThickness) || rimThickness < 0.4 || rimThickness > 20) errors.push('Rim thickness must be between 0.4 and 20 mm.')
-  if (!Number.isFinite(rimLipDepth) || rimLipDepth < 0 || rimLipDepth > 20) errors.push('Rim lip depth must be between 0 and 20 mm.')
-  if (!Number.isFinite(rimClearance) || rimClearance < 0 || rimClearance > 4) errors.push('Rim clearance must be between 0 and 4 mm.')
+  if (!Number.isFinite(adaptationHeight) || adaptationHeight <= 0) errors.push('Bottom adaptation height must be positive.')
+  if (Number.isFinite(height) && Number.isFinite(adaptationHeight) && adaptationHeight >= height) errors.push('Bottom adaptation height must be less than shade height.')
   if (!Number.isInteger(verticalSegments) || verticalSegments < 20 || verticalSegments > 300) errors.push('Vertical segments must be an integer between 20 and 300.')
   if (!Number.isInteger(radialSegments) || radialSegments < 32 || radialSegments > 512) errors.push('Radial segments must be an integer between 32 and 512.')
-
-  const rimInnerDiameter = rimDiameter - 2 * rimThickness
-  if (Number.isFinite(rimInnerDiameter) && rimInnerDiameter <= 0) errors.push('Rim dimensions leave no inner opening.')
-  if (Number.isFinite(rimInnerDiameter) && Number.isFinite(rimLipDepth) && rimLipDepth >= rimInnerDiameter / 2) errors.push('Rim lip depth must leave a positive inner opening.')
   if (Number.isFinite(bottomDiameter) && bottomDiameter <= wallThickness * 2) errors.push('Bottom diameter must be greater than twice the wall thickness.')
   if (Number.isFinite(topDiameter) && topDiameter <= wallThickness * 2) errors.push('Top diameter must be greater than twice the wall thickness.')
-
   if (Number.isFinite(bottomDiameter) && Number.isFinite(topDiameter) && Number.isFinite(amplitude)) {
     const minimumBodyRadius = Math.min(bottomDiameter, topDiameter) / 2
     const minimumDecorativeRadius = minimumBodyRadius * (1 - amplitude / 100)
     if (minimumDecorativeRadius <= wallThickness) errors.push('Amplitude is too large for the current wall thickness.')
   }
-  if (Number.isFinite(rimDiameter) && Number.isFinite(wallThickness) && rimDiameter <= wallThickness * 2) {
-    errors.push('Rim diameter must be greater than twice the wall thickness.')
-  }
 
+  const baseParameters = waveLampBaseParameters(parameters)
+  errors.push(...validateLampBaseParameters(baseParameters).errors)
   return { valid: errors.length === 0, errors }
 }
 
@@ -213,11 +272,11 @@ export const parametricWaveLamp: ParametricModelDefinition<WaveLampParameterValu
   id: 'wave-lamp',
   name: 'Wave Lamp',
   category: 'Lamps',
-  description: 'A closed, hollow lampshade with a twisted radial wave profile and independent circular rim.',
+  description: 'A wave shade with a smooth circular bottom collar, peripheral base seat, independent holder pedestal, and local cable passage.',
   metadata: {
     name: 'Wave Lamp',
     category: 'Lamps',
-    description: 'A closed, hollow lampshade with a twisted radial wave profile and independent circular rim.',
+    description: 'A wave shade with a smooth circular bottom collar, peripheral base seat, independent holder pedestal, and local cable passage.',
   },
   parameters: waveLampParameters,
   parameterSchema: waveLampParameterSchema,

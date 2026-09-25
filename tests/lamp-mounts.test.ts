@@ -1,13 +1,27 @@
-import { parametricWaveLamp } from '../src/generators/wave-lamp.ts'
 import { proceduralBackend } from '../src/cad/procedural-backend.ts'
-import { deriveRimInterface, validateRimInterface } from '../src/geometry/rimInterface.ts'
-import type { MeshData, MeshPart } from '../src/geometry/types.ts'
+import {
+  deriveLampSeatGeometry,
+  generateLampBase,
+  type LampBaseMetadata,
+  type LampHolderReferenceGeneration,
+} from '../src/geometry/lampBase.ts'
+import {
+  createWaveLampProfileRing,
+  generateWaveLampMesh,
+} from '../src/geometry/waveLamp.ts'
+import {
+  parametricWaveLamp,
+  waveLampBaseParameters,
+  waveLampDecorativeParameters,
+  type WaveLampParameterValues,
+} from '../src/generators/wave-lamp.ts'
+import { createConnectionFrame, type MeshData, type MeshPart } from '../src/geometry/types.ts'
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message)
 }
 
-function assertNear(actual: number, expected: number, message: string, tolerance = 1e-5): void {
+function assertNear(actual: number, expected: number, message: string, tolerance = 1e-4): void {
   assert(Math.abs(actual - expected) <= tolerance, `${message}: ${actual} !== ${expected}`)
 }
 
@@ -24,105 +38,147 @@ function finiteMesh(mesh: MeshData, label: string): void {
   if (mesh.normals) assert(Array.from(mesh.normals).every(Number.isFinite), `${label}: normals must be finite.`)
 }
 
-function assertCircularRings(mesh: MeshData, segments: number, label: string): void {
-  const vertexCount = mesh.positions.length / 3
-  assert(vertexCount % segments === 0, `${label} must contain complete radial rings.`)
-  for (let start = 0; start < vertexCount; start += segments) {
-    const first = Math.hypot(mesh.positions[start * 3], mesh.positions[start * 3 + 1])
-    for (let column = 1; column < segments; column += 1) {
-      const offset = (start + column) * 3
-      assertNear(
-        Math.hypot(mesh.positions[offset], mesh.positions[offset + 1]),
-        first,
-        `${label} ring ${start / segments} is circular`,
-        1e-4,
-      )
-    }
-  }
-}
-
 function assertSameMesh(left: MeshData, right: MeshData, label: string): void {
   assert(left.positions.length === right.positions.length, `${label}: vertex counts differ.`)
   assert(left.indices.length === right.indices.length, `${label}: index counts differ.`)
   for (let index = 0; index < left.positions.length; index += 1) {
-    assertNear(left.positions[index], right.positions[index], `${label} position ${index}`, 1e-6)
+    assert(left.positions[index] === right.positions[index], `${label}: position ${index} differs.`)
   }
   for (let index = 0; index < left.indices.length; index += 1) {
-    assert(left.indices[index] === right.indices[index], `${label} index ${index} differs.`)
+    assert(left.indices[index] === right.indices[index], `${label}: index ${index} differs.`)
+  }
+}
+
+function assertCircularRing(mesh: MeshData, segments: number, label: string): void {
+  const firstRadius = Math.hypot(mesh.positions[0], mesh.positions[1])
+  for (let column = 1; column < segments; column += 1) {
+    const offset = column * 3
+    assertNear(Math.hypot(mesh.positions[offset], mesh.positions[offset + 1]), firstRadius, `${label} radius ${column}`)
+    assertNear(mesh.positions[offset + 2], mesh.positions[2], `${label} z ${column}`)
   }
 }
 
 const defaults = parametricWaveLamp.defaults
-const defaultValidation = parametricWaveLamp.validate(defaults)
-assert(defaultValidation.valid, `Default Wave Lamp should validate: ${defaultValidation.errors.join(' ')}`)
-
+assert(parametricWaveLamp.validate(defaults).valid, `Wave Lamp defaults validate: ${parametricWaveLamp.validate(defaults).errors.join(' ')}`)
 const parameterIds = parametricWaveLamp.parameters.map((parameter) => parameter.id)
-for (const id of ['height', 'bottomDiameter', 'topDiameter', 'wallThickness', 'waves', 'amplitude', 'twist', 'rimDiameter', 'rimHeight', 'rimThickness', 'rimLipDepth', 'rimClearance']) {
-  assert(parameterIds.includes(id), `Reduced Wave Lamp parameter ${id} is exposed.`)
+for (const forbidden of ['mountType', 'nominalDiameter', 'pitch', 'length', 'clearance', 'handedness', 'rimDiameter', 'threadSpec', 'threadedHole', 'retainingRing']) {
+  assert(!parameterIds.includes(forbidden), `${forbidden} is not exposed by Wave Lamp.`)
 }
-for (const id of ['baseType', 'threadEnabled', 'mountType', 'patternCount', 'patternAmplitude', 'twistAngle', 'rimFitClearance']) {
-  assert(!parameterIds.includes(id), `Legacy assembly/deformer parameter ${id} stays hidden.`)
+for (const required of ['seatMode', 'fitClearance', 'bottomThickness', 'pedestalDiameter', 'holderOpeningDiameter', 'cableChannelWidth', 'cableChannelDepth']) {
+  assert(parameterIds.includes(required), `${required} is exposed by Wave Lamp.`)
 }
 
-const rim = deriveRimInterface({
-  rimDiameter: defaults.rimDiameter,
-  rimHeight: defaults.rimHeight,
-  rimThickness: defaults.rimThickness,
-  rimLipDepth: defaults.rimLipDepth,
-  rimClearance: defaults.rimClearance,
+const fixedFrame = createConnectionFrame(0, 58.8)
+const directShade = generateWaveLampMesh(waveLampDecorativeParameters(defaults), {
+  shadeInputFrame: fixedFrame,
+  shadeSeat: waveLampBaseParameters(defaults).shadeSeat,
+  adaptationHeight: defaults.bottomAdaptationHeight,
 })
-assert(validateRimInterface(rim).valid, 'Independent RimInterface validates.')
-assertNear(rim.rimOuterDiameter, defaults.rimDiameter, 'Rim diameter is explicit')
+finiteMesh(directShade, 'Direct DecorativeShade')
+const collarRing = createWaveLampProfileRing({
+  parameters: waveLampDecorativeParameters(defaults),
+  inputFrame: fixedFrame,
+  normalizedHeight: 0,
+  shadeSeat: waveLampBaseParameters(defaults).shadeSeat,
+  adaptationHeight: defaults.bottomAdaptationHeight,
+})
+assert(collarRing.points.every((point) => point.radius === collarRing.points[0].radius), 'Bottom collar is circular.')
+assert(collarRing.points.every((point) => Number.isFinite(point.angle)), 'Bottom collar angles are finite.')
 
-const defaultAssembly = await proceduralBackend.generate({ backend: 'procedural', operation: 'wave-lamp', parameters: defaults })
-finiteMesh(defaultAssembly, 'Wave Lamp assembly')
-assert(
-  JSON.stringify(defaultAssembly.parts?.map((candidate) => candidate.id)) === JSON.stringify(['rim-interface', 'decorative-shade']),
-  'Wave Lamp contains only RimInterface and DecorativeShade.',
+const deformersChanged = generateWaveLampMesh({
+  ...waveLampDecorativeParameters(defaults),
+  waves: 64,
+  amplitude: 40,
+  twist: 360,
+}, {
+  shadeInputFrame: fixedFrame,
+  shadeSeat: waveLampBaseParameters(defaults).shadeSeat,
+  adaptationHeight: defaults.bottomAdaptationHeight,
+})
+const changedCollarRing = createWaveLampProfileRing({
+  parameters: { ...waveLampDecorativeParameters(defaults), waves: 64, amplitude: 40, twist: 360 },
+  inputFrame: fixedFrame,
+  normalizedHeight: 0,
+  shadeSeat: waveLampBaseParameters(defaults).shadeSeat,
+  adaptationHeight: defaults.bottomAdaptationHeight,
+})
+assertSameMesh(
+  { positions: directShade.positions.slice(0, defaults.radialSegments * 3), indices: new Uint32Array() },
+  { positions: deformersChanged.positions.slice(0, defaults.radialSegments * 3), indices: new Uint32Array() },
+  'Deformers do not affect the bottom collar',
 )
-for (const id of ['generic-base', 'mount-feature', 'threaded-hub', 'retaining-ring', 'internal-support']) {
-  assert(!defaultAssembly.parts?.some((candidate) => candidate.id === id), `${id} does not participate in Wave Lamp.`)
-}
+assert(changedCollarRing.points.every((point, index) => point.radius === collarRing.points[index].radius), 'Deformers do not affect the collar profile.')
 
-const rimPart = part(defaultAssembly, 'rim-interface')
-const shadePart = part(defaultAssembly, 'decorative-shade')
-finiteMesh(rimPart.mesh, 'RimInterface')
-finiteMesh(shadePart.mesh, 'DecorativeShade')
-assertCircularRings(rimPart.mesh, defaults.radialSegments, 'RimInterface')
-assert(rimPart.outputFrame && shadePart.inputFrame, 'Rim and shade expose a mounting join.')
-if (rimPart.outputFrame && shadePart.inputFrame) {
-  assertNear(rimPart.outputFrame.position.z, shadePart.inputFrame.position.z, 'Rim/shade join height')
-  assertNear(rimPart.outputFrame.radius, shadePart.inputFrame.radius, 'Rim/shade join radius')
-}
+const defaultBaseParameters = waveLampBaseParameters(defaults)
+const seat = deriveLampSeatGeometry(defaultBaseParameters)
+const directBase = generateLampBase(defaultBaseParameters)
+finiteMesh(directBase.mesh, 'Wave Lamp Base')
+assert(directBase.geometry.bottomThickness === defaults.bottomThickness, 'Base records the real bottom thickness.')
+assert(directBase.metadata.cablePassage.isLocal, 'Cable passage is local.')
+assert(directBase.metadata.cablePassage.leavesStructure, 'Cable passage leaves base structure.')
+assert(directBase.geometry.channelFloorZ >= defaults.bottomThickness, 'Cable channel leaves the solid floor.')
+assert(Array.from(directBase.mesh.positions).some((value, index) => index % 3 === 2 && Math.abs(value - directBase.geometry.channelFloorZ) < 1e-4), 'Cable channel has a physical floor.')
+assert(seat.baseSeatOuterDiameter > seat.baseSeatInnerDiameter, 'Peripheral base seat is annular.')
 
-// The first shade ring is circular, untwisted, and exactly seated on the rim.
-const rimRadius = defaults.rimDiameter / 2
-for (let column = 0; column < defaults.radialSegments; column += 1) {
-  const offset = column * 3
-  const angle = (Math.PI * 2 * column) / defaults.radialSegments
-  assertNear(shadePart.mesh.positions[offset], Math.cos(angle) * rimRadius, `Shade mounting x ${column}`, 1e-4)
-  assertNear(shadePart.mesh.positions[offset + 1], Math.sin(angle) * rimRadius, `Shade mounting y ${column}`, 1e-4)
-}
+const assembly = await proceduralBackend.generate({ backend: 'procedural', operation: 'wave-lamp', parameters: defaults })
+finiteMesh(assembly, 'Wave Lamp assembly')
+assert(JSON.stringify(assembly.parts?.map((candidate) => candidate.id)) === JSON.stringify(['base', 'decorative-shade', 'lamp-holder-reference']), 'Assembly has Base, DecorativeShade, and LampHolderReference parts.')
+const basePart = part(assembly, 'base')
+const shadePart = part(assembly, 'decorative-shade')
+const holderPart = part(assembly, 'lamp-holder-reference')
+finiteMesh(basePart.mesh, 'Base part')
+finiteMesh(shadePart.mesh, 'DecorativeShade part')
+finiteMesh(holderPart.mesh, 'LampHolderReference part')
+assert(basePart.outputFrame !== undefined && shadePart.inputFrame !== undefined, 'Shade connects to the base through the peripheral seat.')
+assertNear(basePart.outputFrame?.position.z ?? Number.NaN, shadePart.inputFrame?.position.z ?? Number.NaN, 'Peripheral seat z')
+assertNear(basePart.outputFrame?.radius ?? Number.NaN, shadePart.inputFrame?.radius ?? Number.NaN, 'Peripheral seat radius')
+assert((basePart.outputFrame?.radius ?? 0) > (part(assembly, 'base').inputFrame?.radius ?? 0) * 0.8, 'Shade seat is peripheral.')
+assert(holderPart.inputFrame !== undefined, 'Holder reference has an independent central frame.')
+assert((holderPart.inputFrame?.radius ?? Number.POSITIVE_INFINITY) < (shadePart.inputFrame?.radius ?? 0), 'Central holder frame is not the shade connection.')
+const baseMetadata = (basePart.mesh as MeshData & { lampBaseMetadata: LampBaseMetadata }).lampBaseMetadata
+assert(baseMetadata.printable, 'Base is printable.')
+const holderMetadata = (holderPart.mesh as MeshData & { lampHolderMetadata: LampHolderReferenceGeneration['metadata'] }).lampHolderMetadata
+assert(holderMetadata.referenceOnly && !holderMetadata.printable, 'LampHolderReference is visual only.')
 
-// Wave count, amplitude, and twist cannot change the circular rim mesh.
-const extremeAssembly = await proceduralBackend.generate({
-  backend: 'procedural',
-  operation: 'wave-lamp',
-  parameters: { ...defaults, waves: 64, amplitude: 40, twist: 360 },
+const recessed = await proceduralBackend.generate({ backend: 'procedural', operation: 'wave-lamp', parameters: { ...defaults, seatMode: 'recessed-seat' } })
+const raised = await proceduralBackend.generate({ backend: 'procedural', operation: 'wave-lamp', parameters: { ...defaults, seatMode: 'raised-lip' } })
+const recessedMetadata = (part(recessed, 'base').mesh as MeshData & { lampBaseMetadata: LampBaseMetadata }).lampBaseMetadata
+const raisedMetadata = (part(raised, 'base').mesh as MeshData & { lampBaseMetadata: LampBaseMetadata }).lampBaseMetadata
+assert(recessedMetadata.seat.baseSeatInnerDiameter < recessedMetadata.shadeSeat.collarOuterDiameter + defaults.fitClearance * 2, 'Recessed seat receives the collar.')
+assert(recessedMetadata.shadeSeat.collarOuterDiameter <= recessedMetadata.seat.baseSeatOuterDiameter, 'Recessed collar fits the peripheral seat.')
+assert(raisedMetadata.seat.lipOuterDiameter + defaults.fitClearance <= raisedMetadata.shadeSeat.collarInnerDiameter, 'Raised lip enters the shade collar.')
+assert(raisedMetadata.seat.lipOuterDiameter > raisedMetadata.seat.lipInnerDiameter, 'Raised lip remains circular and annular.')
+
+const mechanicalVariant: WaveLampParameterValues = {
+  ...defaults,
+  baseDiameter: 180,
+  baseThickness: 12,
+  bottomThickness: 5,
+  pedestalDiameter: 60,
+  pedestalHeight: 40,
+  holderOpeningDiameter: 24,
+  cableChannelWidth: 12,
+  cableChannelDepth: 6,
+}
+assert(parametricWaveLamp.validate(mechanicalVariant).valid, `Mechanical variant validates: ${parametricWaveLamp.validate(mechanicalVariant).errors.join(' ')}`)
+const mechanicalShade = generateWaveLampMesh(waveLampDecorativeParameters(mechanicalVariant), {
+  shadeInputFrame: fixedFrame,
+  shadeSeat: waveLampBaseParameters(mechanicalVariant).shadeSeat,
+  adaptationHeight: mechanicalVariant.bottomAdaptationHeight,
 })
-const extremeRimPart = part(extremeAssembly, 'rim-interface')
-assertSameMesh(rimPart.mesh, extremeRimPart.mesh, 'RimInterface remains identical under deformers')
-assert(
-  JSON.stringify(extremeAssembly.parts?.map((candidate) => candidate.id)) === JSON.stringify(['rim-interface', 'decorative-shade']),
-  'Extreme deformers do not add mechanical parts.',
-)
+assertSameMesh(directShade, mechanicalShade, 'Base and holder changes do not alter DecorativeShade')
+const mechanicalAssembly = await proceduralBackend.generate({ backend: 'procedural', operation: 'wave-lamp', parameters: mechanicalVariant })
+const mechanicalShadePart = part(mechanicalAssembly, 'decorative-shade')
+for (let index = defaults.radialSegments * 3; index < shadePart.mesh.positions.length; index += 3) {
+  assertNear(shadePart.mesh.positions[index], mechanicalShadePart.mesh.positions[index], 'Shade body x remains unchanged under base mechanics', 1e-4)
+  assertNear(shadePart.mesh.positions[index + 1], mechanicalShadePart.mesh.positions[index + 1], 'Shade body y remains unchanged under base mechanics', 1e-4)
+  assertNear(
+    shadePart.mesh.positions[index + 2] - (shadePart.inputFrame?.position.z ?? 0),
+    mechanicalShadePart.mesh.positions[index + 2] - (mechanicalShadePart.inputFrame?.position.z ?? 0),
+    'Shade body z remains unchanged under base mechanics',
+    1e-4,
+  )
+}
 
-// Shade dimensions are independent too: only the shade body changes when its diameters change.
-const resizedAssembly = await proceduralBackend.generate({
-  backend: 'procedural',
-  operation: 'wave-lamp',
-  parameters: { ...defaults, bottomDiameter: 220, topDiameter: 180 },
-})
-assertSameMesh(rimPart.mesh, part(resizedAssembly, 'rim-interface').mesh, 'RimInterface remains independent of shade dimensions')
-
-console.log('Wave Lamp + RimInterface stabilization tests passed.')
+assertCircularRing(directShade, defaults.radialSegments, 'Decorative collar ring')
+console.log('Wave Lamp peripheral mechanical redesign tests passed.')
